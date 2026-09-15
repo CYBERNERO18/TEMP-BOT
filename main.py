@@ -1,2501 +1,1117 @@
-import asyncio
-import sqlite3
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify
+import json
+import os
+import subprocess
 import random
-import logging
-import time
-import aiohttp
-import hmac
-import hashlib
-import urllib.parse
+import string
+import uuid
 from datetime import datetime, timedelta
-from typing import Optional, List, Tuple, Dict, Any
+import sys
+import shutil
+import threading
+import time
+import zipfile
+import psutil
 
-from aiogram import Bot, Dispatcher, F, BaseMiddleware
-from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command, CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message, Dice, BufferedInputFile
-)
+app = Flask(__name__)
+app.secret_key = 'nero-super-secret-key-2026'
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
-# ==============================================================================
-# 1. BOT CONFIGURATION & CONSTANTS
-# ==============================================================================
-BOT_TOKEN = "8709004641:AAGLR5_-sQrtZMt4TahbJPIxL1kTJ-857PM"
-BOT_USERNAME = "@neromodstestbot"
-ADMIN_ID = 5831952869
-ADMIN_CONTACT = "@rb_nero"
+USERS_FILE = 'users.json'
+BOTS_DIR = 'bots'
+CPU_HISTORY = {}
+CRASH_COUNT = {}
+NET_STATS = {}
 
+os.makedirs(BOTS_DIR, exist_ok=True)
 
-USDT_TO_INR = 90.0
-VIP_DISCOUNT_PERCENTAGE = 10.0
-VIP_PRICE_INR = 1000.0
+# ============================================
+# রেট লিমিট
+# ============================================
 
-WELCOME_STICKER_ID = "CAACAgIAAxkBAAEU-WZmH_..."  # Replace with your sticker ID
-SPIN_DELAY_SECONDS = 2.5
-
-FIXED_CATEGORIES = [
-    "ANDROID NON ROOT PANEL",
-    "ANDROID ROOT PANEL",
-    "IPHONE PANEL",
-    "PC PANEL"
-]
-
-# ==============================================================================
-# YOUR PREMIUM EMOJIS – all required emoji IDs (updated with new premium ones)
-# ==============================================================================
-DEFAULT_EMOJIS = {
-    'product_store': '6163205892834598715',          # already premium
-    'profile': '6161068493769810928',                # new premium
-    'add_balance': '5429651785352501917',            # new premium
-    'history': '6032594876506312598',                # new premium
-    'referral': '5350452584119279096',               # new premium
-    'support': '6210671723906342799',                # new premium
-    'ludo_spin': '5382194935057372936',              # new premium
-    'back': '5409357944619802453',                   # new premium
-    'upi': '6161041877857475666',                    # new premium
-    'binance': '6161089551994462716',                # new premium
-    'reseller': '5447410659077661506',               # new premium
-    'tutorial': '5260293700088511294',               # new premium
-    'download': '6161336001512874965',               # already premium
-    'telegram': '5456140674028019486',               # new premium
-    'whatsapp': '5251203410396458957',               # new premium
-    'welcome': '5397782960512444700',                # new premium
-    'vip': '5206607081334906820',                    # new premium
-    'category_android_non_root': '6161172706856282588',
-    'category_android_root': '6161449831031118974',
-    'category_iphone': '6161399700172840408',
-    'category_pc': '5350554349074391003',
-    'grid_id': '5474625972751837256',
-    'name': '5215399540814781035',
-    'account_level': '6129584162992034014',
-    'regular_user': '5904630315946611415',
-    'wallet': '6210859306602995217',
-    'current_balance': '5316711376876485361',
-    'global_stats': '6161437856662298090',
-    'total_orders': '6160968017304888311',
-    'total_spent': '5197503331215361533',
-    'total_referrals': '5938196735200333756',
-    'joined_grid': '5433614043006903194',
-    'info_icon': '6037421444789440735',
-    'check_icon': '6161241250239356403',
-    'checkbox_icon': '6161437856662298090',
-    'shield_icon': '6086672466132865380',
-    'money_icon': '5890848474563352982',
-    'redeem_icon': '5377624166436445368',
-    'wallet_left': '6210859306602995217',
-    'wallet_right': '5305699699204837855',
-    'point_down': '6161302621027049305',
-}
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("bot_activity.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-dp = Dispatcher()
-
-def fmt_curr(amount: float) -> str:
-    return f"₹{amount:,.2f}"
-
-def safe_float(val, default=0.0):
-    """Safely convert a value to float, return default if fails."""
-    if val is None or val == "":
-        return default
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
-
-# ==============================================================================
-# 2. DATABASE FUNCTIONS
-# ==============================================================================
-def db_query(query: str, params: tuple = (), fetchone: bool = False, fetchall: bool = False, commit: bool = True) -> Any:
-    conn = sqlite3.connect('Cuibcc.db')
-    c = conn.cursor()
-    try:
-        c.execute(query, params)
-        if fetchone:
-            res = c.fetchone()
-        elif fetchall:
-            res = c.fetchall()
-        else:
-            res = None
-        if commit: conn.commit()
-        return res
-    except Exception as e:
-        logger.error(f"DB Error: {e} | Query: {query} | Params: {params}")
-        if commit: conn.rollback()
-        return None
-    finally:
-        conn.close()
-
-def get_setting(key: str, default: str = "") -> str:
-    val = db_query("SELECT value FROM settings WHERE key=?", (key,), fetchone=True)
-    return val[0] if val and val[0] else default
-
-def set_setting(key: str, value: str) -> None:
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-
-def log_activity(user_id: int, action: str, details: str = "") -> None:
-    try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        db_query(
-            "INSERT INTO activity_logs (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)",
-            (user_id, action, details, timestamp)
-        )
-    except Exception as e:
-        logger.error(f"Failed to log activity: {e}")
-
-def get_emoji(slot: str, default_id: str = None) -> str:
-    stored = get_setting(f"emoji_{slot}", "")
-    emoji_id = stored if stored and stored.isdigit() else (default_id or DEFAULT_EMOJIS.get(slot, ""))
-    if emoji_id:
-        return f'<tg-emoji emoji-id="{emoji_id}">✨</tg-emoji>'
-    return "✨"
-
-def get_emoji_icon(slot: str, default_id: str = None) -> str:
-    stored = get_setting(f"emoji_{slot}", "")
-    emoji_id = stored if stored and stored.isdigit() else (default_id or DEFAULT_EMOJIS.get(slot, ""))
-    return emoji_id
-
-# ==============================================================================
-# 3. STRING RESOURCES – using placeholders for premium emojis
-# ==============================================================================
-UI_TEXTS = {
-    "start_menu": (
-        "✨ <b>𝗪𝗘𝗟𝗖𝗢𝗠𝗘 𝗧𝗢 𝗧𝗛𝗘 𝗦𝗛𝗢𝗣</b>\n\n"
-        "{product_store} 𝗣𝗥𝗢𝗗𝗨𝗖𝗧 𝗦𝘁𝗼𝗿𝗲 : 𝗮𝗹𝗹 𝗸𝗲𝘆𝘀 𝗣𝘂𝗿𝗰𝗵𝗮𝘀𝗲  & 𝗶𝗻𝘀𝘁𝗮𝗻𝘁𝗹𝘆 𝗱𝗲𝗹𝗶𝘃𝗲𝗿𝘆\n"
-        "{profile} 𝗠𝘆 𝗽𝗿𝗼𝗳𝗶𝗹𝗲 : 𝗰𝗵𝗲𝗰𝗸 𝘆𝗼𝘂𝗿 𝗮𝗰𝗰𝗼𝘂𝗻𝘁 𝗶𝗻𝗳𝗼𝗿𝗺𝗮𝘁𝗶𝗼𝗻\n"
-        "{add_balance} 𝗔𝗱𝗱 𝗯𝗮𝗹𝗮𝗻𝗰𝗲 : 𝗱𝗲𝗽𝗼𝘀𝗶𝘁𝗲 𝗯𝗮𝗹𝗮𝗻𝗰𝗲 & 𝘀𝗲𝗰𝘂𝗿𝗲 𝘀𝗲𝗿𝘃𝗶𝗰𝗲\n"
-        "{history} 𝗔𝗹𝗹 𝗵𝗶𝘀𝘁𝗼𝗿𝘆 : 𝗰𝗵𝗲𝗰𝗸 𝗮𝗹𝗹 𝗽𝘂𝗿𝗰𝗵𝗮𝘀𝗲 𝗵𝗶𝘀𝘁𝗼𝗿𝘆\n"
-        "{referral} 𝗥𝗲𝗳𝗲𝗿𝗿𝗮𝗹 : 𝗶𝗻𝘃𝗶𝘁𝗲 𝗳𝗿𝗶𝗲𝗻𝗱𝘀 & 𝗲𝗮𝗿𝗻 𝗿𝗲𝘄𝗮𝗿𝗱𝘀\n"
-        "{tutorial} 𝗧𝘂𝘁𝗼𝗿𝗶𝗮𝗹 : 𝘃𝗶𝗲𝘄 𝘁𝘂𝘁𝗼𝗿𝗶𝗮𝗹 & 𝘄𝗼𝗿𝗸 𝘁𝗵𝗶𝘀 𝗯𝗼𝘁\n"
-        "{support} 𝗦𝘂𝗽𝗽𝗼𝗿𝘁 : 𝗯𝗼𝘁 𝗽𝗿𝗼𝗯𝗹𝗲𝗺 𝘀𝗼𝗹𝘃𝗲𝗱 𝗳𝗼𝗿 𝘀𝘂𝗽𝗽𝗼𝗿𝘁 𝗮𝗱𝗺𝗶𝗻\n"
-        "{ludo_spin} 𝗟𝘂𝗱𝗼 𝗦𝗽𝗶𝗻 :𝗽𝗹𝗮𝘆 𝗴𝗮𝗺𝗲 𝗮𝗻𝗱 𝘄𝗶𝗻 𝗯𝗮𝗹𝗮𝗻𝗰𝗲\n"
-        "{download} 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱 𝗙𝗶𝗹𝗲 : 𝗱𝗼𝘄𝗻𝗹𝗼𝗮𝗱 𝗹𝗮𝘁𝗲𝘀𝘁 𝗮𝗽𝗸 𝗳𝗼𝗿 𝘀𝗮𝗳𝗲𝘁𝘆."
-    ),
-    "download_files": (
-        "🗂 <b><u>DOWNLOAD PREMIUM APK & FILES 📊</u></b>\n\n"
-        "🌐 All our highly secured, premium, and updated files\n"
-        "are securely hosted on our private channel! ⚠️⛔️\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "📱 <b>WHAT YOU GET:</b> 📌\n\n"
-        "✔️ Latest APK Updates 🔔\n"
-        "✔️ 100% Virus Free & Secure ‼️\n"
-        "✔️ All Configs & Scripts 🌸\n"
-        "✔️ Complete Installation Guides 🔺\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "⌨️ Tap the button below to access the Download Channel! 📝"
-    ),
-    "lucky_dice_result": (
-        "{ludo_spin} <b><u>LUCKY DICE RESULT 🔨 💯</u></b>\n\n"
-        "🎲 <b>Dice Value:</b> {dice_value}\n\n"
-        "💸 <b>You Won:</b> {won_amount}\n"
-        "💰 <b>Total Balance:</b> {new_balance}\n\n"
-        "Congratulations! Come back after 24 hours."
-    ),
-    "vip_menu": (
-        "🌟 <b><u>VIP MEMBERSHIP CLUB</u></b> 🌟\n\n"
-        "Unlock premium benefits and permanent discounts!\n\n"
-        "💎 <b>VIP Benefits:</b>\n"
-        "• Flat 15% off on ALL products (Stacks with Reseller!)\n"
-        "• Priority Support\n"
-        "• Exclusive VIP-only giveaways\n\n"
-        "💳 <b>VIP Price:</b> ₹299.00 (Lifetime)\n"
-        "👤 <b>Your Status:</b> {vip_status}"
-    ),
-    "add_balance_menu": (
-        "{add_balance} <b>ADD BALANCE</b> {info_icon}\n\n"
-        "{info_icon} Select your preferred payment method. {check_icon}\n\n"
-        "┣ {upi} UPI — Fast Indian payments {checkbox_icon}\n"
-        "┣ {binance} Binance — Crypto payments {checkbox_icon}\n\n"
-        "{shield_icon} Payments are verified securely. {check_icon}"
-    )
-}
-
-def get_ui_text(key: str, **kwargs) -> str:
-    val = db_query("SELECT value FROM settings WHERE key=?", (f"ui_{key}",), fetchone=True)
-    template = val[0] if val and val[0] else UI_TEXTS.get(key, "")
-
-    emoji_map = {
-        '{product_store}': get_emoji('product_store'),
-        '{profile}': get_emoji('profile'),
-        '{add_balance}': get_emoji('add_balance'),
-        '{history}': get_emoji('history'),
-        '{referral}': get_emoji('referral'),
-        '{tutorial}': get_emoji('tutorial'),
-        '{support}': get_emoji('support'),
-        '{ludo_spin}': get_emoji('ludo_spin'),
-        '{download}': get_emoji('download'),
-        '{telegram}': get_emoji('telegram'),
-        '{whatsapp}': get_emoji('whatsapp'),
-        '{upi}': get_emoji('upi'),
-        '{binance}': get_emoji('binance'),
-        '{info_icon}': get_emoji('info_icon'),
-        '{check_icon}': get_emoji('check_icon'),
-        '{checkbox_icon}': get_emoji('checkbox_icon'),
-        '{shield_icon}': get_emoji('shield_icon'),
-        '{money_icon}': get_emoji('money_icon'),
-        '{redeem_icon}': get_emoji('redeem_icon'),
-        '{wallet_left}': get_emoji('wallet_left'),
-        '{wallet_right}': get_emoji('wallet_right'),
-        '{point_down}': get_emoji('point_down'),
-    }
-    for placeholder, emoji_tag in emoji_map.items():
-        template = template.replace(placeholder, emoji_tag)
-
-    if kwargs:
+class RateLimiter:
+    def check_rate(self, server_id, limit_percent):
+        if server_id not in CPU_HISTORY:
+            CPU_HISTORY[server_id] = []
+        users = load_users()
+        server = None
+        for uname, data in users.items():
+            if uname == 'admin': continue
+            servers = data.get('servers', [])
+            if not isinstance(servers, list): continue
+            for s in servers:
+                if isinstance(s, dict) and s.get('server_id') == server_id:
+                    server = s
+                    break
+        if not server or server.get('status') != 'running':
+            return False, 0
+        pid = server.get('pid')
+        if not pid: return False, 0
         try:
-            return template.format(**kwargs)
-        except KeyError as e:
-            logger.warning(f"Missing formatting key for template {key}: {e}")
-    return template
+            proc = psutil.Process(pid)
+            cpu = proc.cpu_percent(interval=1)
+            now = time.time()
+            CPU_HISTORY[server_id].append({'time': now, 'cpu': cpu})
+            CPU_HISTORY[server_id] = [h for h in CPU_HISTORY[server_id] if now - h['time'] < 30]
+            recent = [h['cpu'] for h in CPU_HISTORY[server_id] if now - h['time'] < 10]
+            if recent:
+                avg_cpu = sum(recent) / len(recent)
+                if avg_cpu > limit_percent:
+                    return True, avg_cpu
+        except: pass
+        return False, 0
 
-# ==============================================================================
-# 4. DATABASE INITIALISATION & MIGRATION
-# ==============================================================================
-def init_db() -> None:
-    conn = sqlite3.connect('Cuibcc.db')
-    c = conn.cursor()
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY, 
-            phone TEXT, 
-            first_name TEXT, 
-            username TEXT,
-            balance REAL DEFAULT 0.0, 
-            account_type TEXT DEFAULT 'Regular', 
-            orders_count INTEGER DEFAULT 0, 
-            spent REAL DEFAULT 0.0, 
-            referrals_count INTEGER DEFAULT 0, 
-            referral_earned REAL DEFAULT 0.0, 
-            referred_by INTEGER, 
-            last_spin TEXT, 
-            joined_date TEXT,
-            is_reseller INTEGER DEFAULT 0,
-            reseller_since TEXT,
-            total_saved REAL DEFAULT 0.0,
-            is_banned INTEGER DEFAULT 0,
-            warnings INTEGER DEFAULT 0,
-            is_vip INTEGER DEFAULT 0,
-            vip_since TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            category TEXT, 
-            panel_name TEXT DEFAULT '',
-            name TEXT, 
-            price_inr REAL, 
-            reseller_price REAL DEFAULT 0.0,
-            stock INTEGER, 
-            apk_link TEXT, 
-            validity TEXT DEFAULT 'Lifetime', 
-            device_limit TEXT DEFAULT '1 Device',
-            is_active INTEGER DEFAULT 1
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS product_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            product_id INTEGER, 
-            key_text TEXT, 
-            is_used INTEGER DEFAULT 0
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            user_id INTEGER, 
-            product_name TEXT, 
-            price_paid REAL, 
-            delivered_key TEXT, 
-            purchase_date TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS tickets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            user_id INTEGER, 
-            message TEXT, 
-            status TEXT DEFAULT 'Open',
-            created_at TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY, 
-            value TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS coupons (
-            code TEXT PRIMARY KEY, 
-            amount REAL, 
-            uses_left INTEGER
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS redeemed (
-            user_id INTEGER, 
-            code TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
-            order_id TEXT PRIMARY KEY, 
-            user_id INTEGER, 
-            amount_inr REAL, 
-            status TEXT, 
-            timestamp INTEGER
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS crypto_txns (
-            txid TEXT PRIMARY KEY, 
-            user_id INTEGER, 
-            amount_usdt REAL, 
-            timestamp INTEGER
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS spin_rewards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            amount REAL
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS activity_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            action TEXT,
-            details TEXT,
-            timestamp TEXT
-        )
-    ''')
+rate_limiter = RateLimiter()
 
-    migrations = [
-        "ALTER TABLE users ADD COLUMN is_vip INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN vip_since TEXT",
-        "ALTER TABLE products ADD COLUMN is_active INTEGER DEFAULT 1",
-        "ALTER TABLE tickets ADD COLUMN created_at TEXT",
-        "ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN warnings INTEGER DEFAULT 0",
-        "ALTER TABLE products ADD COLUMN panel_name TEXT DEFAULT ''"
-    ]
-    for mig in migrations:
-        try: c.execute(mig)
-        except sqlite3.OperationalError: pass
-    
-    c.execute("SELECT COUNT(*) FROM spin_rewards")
-    if c.fetchone()[0] == 0:
-        c.executemany("INSERT INTO spin_rewards (amount) VALUES (?)", [(0.0,), (1.0,), (2.0,), (5.0,), (10.0,)])
+# ============================================
+# অটো-রিস্টার্ট
+# ============================================
 
-    default_settings = [
-        ('spin_status', 'ON'),
-        ('daily_spin_limit', '50.0'),
-        ('reseller_system_status', 'ON'),
-        ('bot_status', 'ON'),
-        ('how_to_video', 'None'),
-        ('all_files_link', 'None'),
-        ('zapupi_api', ''),
-        ('binance_api', ''),
-        ('binance_secret', ''),
-        ('binance_address', ''),
-        ('vip_status', 'OFF'),
-        ('reseller_setup_fee', '200.0'),
-        ('reseller_min_balance', '500.0'),
-        ('migration_done', '0'),
-        ('support_telegram', 'https://t.me/YourSupport'),
-        ('support_whatsapp', 'https://wa.me/YourNumber'),
-        ('ui_start_menu', UI_TEXTS['start_menu']),
-        ('ui_download_files', UI_TEXTS['download_files']),
-        ('ui_lucky_dice_result', UI_TEXTS['lucky_dice_result']),
-        ('ui_vip_menu', UI_TEXTS['vip_menu']),
-        ('ui_add_balance_menu', UI_TEXTS['add_balance_menu']),
-    ]
-    for slot, emoji_id in DEFAULT_EMOJIS.items():
-        default_settings.append((f"emoji_{slot}", emoji_id))
-    
-    for key, val in default_settings:
-        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, val))
-
-    conn.commit()
-    conn.close()
-
-def migrate_categories() -> None:
-    done = get_setting("migration_done", "0")
-    
-    # ALWAYS force update emojis and UI texts regardless of migration status
-    logger.info("Forcing emoji and UI text updates...")
-    
-    # Update all emoji settings
-    for slot, emoji_id in DEFAULT_EMOJIS.items():
-        set_setting(f"emoji_{slot}", emoji_id)
-    
-    # Force update UI texts
-    set_setting("ui_start_menu", UI_TEXTS['start_menu'])
-    set_setting("ui_add_balance_menu", UI_TEXTS['add_balance_menu'])
-    set_setting("ui_download_files", UI_TEXTS['download_files'])
-    set_setting("ui_lucky_dice_result", UI_TEXTS['lucky_dice_result'])
-    set_setting("ui_vip_menu", UI_TEXTS['vip_menu'])
-    logger.info("UI texts and emojis updated with new placeholders and IDs.")
-    
-    # Fix any corrupted price columns (one-time cleanup)
-    conn = sqlite3.connect('Cuibcc.db')
-    c = conn.cursor()
-    products = c.execute("SELECT id, price_inr, reseller_price FROM products").fetchall()
-    for prod in products:
-        pid = prod[0]
-        for col in ['price_inr', 'reseller_price']:
-            val = prod[1] if col == 'price_inr' else prod[2]
-            if val is None or val == "":
-                new_val = 0.0
-            else:
-                try:
-                    new_val = float(val)
-                except (ValueError, TypeError):
-                    new_val = 0.0
-            c.execute(f"UPDATE products SET {col}=? WHERE id=?", (new_val, pid))
-    conn.commit()
-    conn.close()
-    logger.info("Fixed any non-numeric price columns.")
-    
-    if done == "1":
-        return
-    
-    logger.info("Running category migration...")
-    
-    mapping = {
-        "android non root panel": "ANDROID NON ROOT PANEL",
-        "android root panel": "ANDROID ROOT PANEL",
-        "iphone panel": "IPHONE PANEL",
-        "pc panel": "PC PANEL",
-    }
-    for old, new in mapping.items():
-        db_query("UPDATE products SET category = ? WHERE LOWER(category) = ?", (new, old))
-    
-    db_query("UPDATE products SET category = 'ANDROID NON ROOT PANEL' WHERE LOWER(category) NOT IN (?, ?, ?, ?)",
-             ("android non root panel", "android root panel", "iphone panel", "pc panel"))
-    
-    set_setting("migration_done", "1")
-    logger.info("Category migration complete.")
-
-# ==============================================================================
-# 5. MIDDLEWARES & SECURITY
-# ==============================================================================
-async def hacker_loading(message: Message, text: str = "Decrypting Data") -> Message:
-    msg = await message.answer(f"⚡ {text}\n[□□□] 0%")
-    await asyncio.sleep(0.3)
-    await msg.edit_text(f"⚡ {text}\n[■□□] 33%", parse_mode='HTML')
-    await asyncio.sleep(0.3)
-    await msg.edit_text(f"⚡ {text}\n[■■□] 66%", parse_mode='HTML')
-    await asyncio.sleep(0.3)
-    await msg.edit_text(f"⚡ {text}\n[■■■] 100%", parse_mode='HTML')
-    return msg
-
-class GlobalSecurityMiddleware(BaseMiddleware):
-    def __init__(self):
-        super().__init__()
-        self.last_action_times = {}
-
-    async def __call__(self, handler, event, data):
-        user_id = event.from_user.id
-        now = time.time()
-        if user_id in self.last_action_times:
-            if now - self.last_action_times[user_id] < 0.3:
-                return
-        self.last_action_times[user_id] = now
-
-        if user_id != ADMIN_ID:
-            user_info = db_query("SELECT is_banned FROM users WHERE user_id=?", (user_id,), fetchone=True)
-            if user_info and user_info[0] == 1:
-                msg = "🚫 <b>ACCESS DENIED</b>\nYou have been banned from using this bot.\nContact support if you think this is a mistake."
-                if isinstance(event, Message): await event.answer(msg)
-                elif isinstance(event, CallbackQuery): await event.answer(msg, show_alert=True)
-                return
-                
-            status_check = db_query("SELECT value FROM settings WHERE key='bot_status'", fetchone=True)
-            status = status_check[0] if status_check else 'ON'
-            if status == 'OFF':
-                msg = "⚠️ <b>Store Maintenance</b>\n\nThe store is currently offline for updates. Please check back later!"
-                if isinstance(event, Message): await event.answer(msg)
-                elif isinstance(event, CallbackQuery): await event.answer("⚠️ Bot is currently OFF for Maintenance.", show_alert=True)
-                return
-                
-        return await handler(event, data)
-
-dp.message.middleware(GlobalSecurityMiddleware())
-dp.callback_query.middleware(GlobalSecurityMiddleware())
-
-# ==============================================================================
-# 6. FSM STATES
-# ==============================================================================
-class UserStates(StatesGroup):
-    wait_for_ticket = State()
-    wait_for_redeem = State()
-    wait_for_crypto_txid = State()
-    custom_amount_input = State()
-
-class AdminStates(StatesGroup):
-    add_prod_category = State()
-    add_prod_panel_name = State()
-    add_prod_name = State()
-    add_prod_validity = State()
-    add_prod_device_limit = State()
-    add_prod_price = State()
-    add_prod_reseller_price = State()
-    add_prod_apk = State()
-    add_prod_keys = State()
-    
-    edit_prod_field = State()
-    wait_for_new_value = State()
-    wait_for_add_keys = State()
-    wait_for_delete_key = State()
-    
-    broadcast_msg = State()
-    add_coupon_code = State()
-    add_coupon_amount = State()
-    add_coupon_uses = State()
-    
-    wait_for_zapupi_api = State()
-    wait_for_binance_api = State()
-    wait_for_binance_secret = State()
-    wait_for_binance_address = State()
-    
-    ticket_reply_msg = State()
-    reseller_manage_id = State()
-    manage_target_user = State()
-    wait_for_add_money = State()
-    wait_for_minus_money = State()
-    wait_for_warning = State()
-    
-    spin_add_reward = State()
-    spin_set_limit = State()
-    wait_for_howto_video = State()
-    wait_for_all_files_link = State()
-    
-    edit_ui_text = State()
-    edit_reseller_price = State()
-    wait_for_reseller_setup_fee = State()
-    wait_for_reseller_min_balance = State()
-    confirm_ban = State()
-    
-    wait_for_support_telegram = State()
-    wait_for_support_whatsapp = State()
-    wait_for_category_emoji = State()
-    wait_for_panel_emoji_id = State()
-    wait_for_emoji_slot = State()
-
-# ==============================================================================
-# 7. KEYBOARDS
-# ==============================================================================
-def get_category_emoji(category: str) -> str:
-    slot_map = {
-        "ANDROID NON ROOT PANEL": "category_android_non_root",
-        "ANDROID ROOT PANEL": "category_android_root",
-        "IPHONE PANEL": "category_iphone",
-        "PC PANEL": "category_pc",
-    }
-    slot = slot_map.get(category)
-    if slot:
-        return get_emoji_icon(slot, DEFAULT_EMOJIS.get(slot, ""))
-    return ""
-
-def get_panel_emoji(panel_name: str) -> str:
-    stored = get_setting(f"panel_emoji_{panel_name}", "")
-    if stored and stored.isdigit():
-        return stored
-    return get_emoji_icon("product_store")
-
-def contact_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Verify Contact", request_contact=True)]], 
-        resize_keyboard=True, 
-        one_time_keyboard=True
-    )
-
-def main_menu_kb(user_id: Optional[int] = None) -> InlineKeyboardMarkup:
-    status_check = db_query("SELECT value FROM settings WHERE key='reseller_system_status'", fetchone=True)
-    sys_status = status_check[0] if status_check else 'ON'
-    vip_sys_check = db_query("SELECT value FROM settings WHERE key='vip_status'", fetchone=True)
-    vip_system = vip_sys_check[0] if vip_sys_check else 'OFF'
-    
-    is_reseller = False
-    if user_id:
-        user_check = db_query("SELECT is_reseller FROM users WHERE user_id=?", (user_id,), fetchone=True)
-        if user_check:
-            is_reseller = bool(user_check[0])
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(
-            text="Product Store", callback_data="menu_shop",
-            icon_custom_emoji_id=get_emoji_icon("product_store"),
-            style="success"
-        )
-    ])
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(
-            text="My Profile", callback_data="menu_profile",
-            icon_custom_emoji_id=get_emoji_icon("profile"),
-            style="success"
-        ),
-        InlineKeyboardButton(
-            text="Add Balance", callback_data="menu_add_balance",
-            icon_custom_emoji_id=get_emoji_icon("add_balance"),
-            style="success"
-        )
-    ])
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(
-            text="All History", callback_data="menu_orders",
-            icon_custom_emoji_id=get_emoji_icon("history"),
-            style="success"
-        ),
-        InlineKeyboardButton(
-            text="Referral", callback_data="menu_referral",
-            icon_custom_emoji_id=get_emoji_icon("referral"),
-            style="success"
-        )
-    ])
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(
-            text="Tutorials", callback_data="menu_how_to",
-            icon_custom_emoji_id=get_emoji_icon("tutorial"),
-            style="success"
-        ),
-        InlineKeyboardButton(
-            text="Support", callback_data="menu_support",
-            icon_custom_emoji_id=get_emoji_icon("support"),
-            style="success"
-        )
-    ])
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(
-            text="Ludo Spin", callback_data="menu_spin_landing",
-            icon_custom_emoji_id=get_emoji_icon("ludo_spin"),
-            style="success"
-        ),
-        InlineKeyboardButton(
-            text="Download Files", callback_data="menu_all_files",
-            icon_custom_emoji_id=get_emoji_icon("download"),
-            style="success"
-        )
-    ])
-    
-    extras_row = []
-    if sys_status == 'ON' or is_reseller:
-        extras_row.append(InlineKeyboardButton(
-            text="Reseller Panel", callback_data="menu_reseller_dash",
-            icon_custom_emoji_id=get_emoji_icon("reseller"),
-            style="success"
-        ))
-    if vip_system == 'ON':
-        extras_row.append(InlineKeyboardButton(
-            text="VIP Club", callback_data="menu_vip_dash",
-            style="success"
-        ))
-    if extras_row:
-        kb.inline_keyboard.append(extras_row)
-        
-    return kb
-
-def back_kb(callback: str = "back_main") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(
-                text="BACK", callback_data=callback,
-                icon_custom_emoji_id=get_emoji_icon("back"),
-                style="danger"
-            )
-        ]]
-    )
-
-def admin_kb() -> InlineKeyboardMarkup:
-    status = db_query("SELECT value FROM settings WHERE key='bot_status'", fetchone=True)
-    status_val = status[0] if status else 'ON'
-    vip_status = db_query("SELECT value FROM settings WHERE key='vip_status'", fetchone=True)
-    vip_val = vip_status[0] if vip_status else 'OFF'
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Bot Statistics", callback_data="admin_view_stats", style="success")],
-        [InlineKeyboardButton(text="👥 User Control Panel", callback_data="admin_user_control_start", style="success")],
-        [
-            InlineKeyboardButton(text="➕ Add Product", callback_data="admin_add_prod", style="success"),
-            InlineKeyboardButton(text="📦 Manage Products", callback_data="admin_manage_prods", style="success")
-        ],
-        [
-            InlineKeyboardButton(text="👑 Reseller Mgmt", callback_data="admin_reseller_menu", style="success"),
-            InlineKeyboardButton(text="🎰 Spin Settings", callback_data="admin_spin_menu", style="success")
-        ],
-        [
-            InlineKeyboardButton(text="🎟 Create Coupon", callback_data="admin_create_coupon", style="success"),
-            InlineKeyboardButton(text="📢 Broadcast", callback_data="admin_broadcast_btn", style="success")
-        ],
-        [
-            InlineKeyboardButton(text="🎫 View Tickets", callback_data="admin_view_tickets", style="success"),
-            InlineKeyboardButton(text="📹 Tutorial Video", callback_data="admin_set_video", style="success")
-        ],
-        [
-            InlineKeyboardButton(text="🔗 All Files Link", callback_data="admin_set_all_files", style="success"),
-            InlineKeyboardButton(text="🎨 Edit All Emojis", callback_data="admin_edit_emojis", style="success")
-        ],
-        [
-            InlineKeyboardButton(text="⚙️ ZapUPI Setup", callback_data="admin_setup_zapupi", style="success"),
-            InlineKeyboardButton(text="🪙 Binance Setup", callback_data="admin_setup_binance", style="success")
-        ],
-        [
-            InlineKeyboardButton(text="✏️ Edit UI Texts", callback_data="admin_edit_ui_menu", style="success"),
-            InlineKeyboardButton(text="📝 Edit Reseller Price", callback_data="admin_edit_reseller_price", style="success")
-        ],
-        [
-            InlineKeyboardButton(text="💰 Reseller Fee", callback_data="admin_set_reseller_fee", style="success"),
-            InlineKeyboardButton(text="💳 Min Balance", callback_data="admin_set_reseller_min", style="success")
-        ],
-        [
-            InlineKeyboardButton(text="📞 Set Support Links", callback_data="admin_set_support_links", style="success"),
-            InlineKeyboardButton(text="🎨 Set Category Emojis", callback_data="admin_set_category_emojis", style="success")
-        ],
-        [
-            InlineKeyboardButton(text="🖼 Set Panel Emojis", callback_data="admin_set_panel_emojis", style="success")
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"Bot Status: {status_val} {'🟢' if status_val == 'ON' else '🔴'}",
-                callback_data="admin_toggle_bot",
-                style="success" if status_val == 'ON' else "danger"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"VIP System: {vip_val} {'🟢' if vip_val == 'ON' else '🔴'}",
-                callback_data="admin_toggle_vip_sys",
-                style="success" if vip_val == 'ON' else "danger"
-            )
-        ]
-    ])
-    return kb
-
-def admin_back_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="Back to Admin", callback_data="admin_panel_back",
-            icon_custom_emoji_id=get_emoji_icon("back"),
-            style="danger"
-        )
-    ]])
-
-# ==============================================================================
-# 8. NOTIFICATIONS
-# ==============================================================================
-async def send_advanced_notification(user_id: int, notif_type: str, amount: float, product: str = None, key: str = None, gateway: str = "ZapUPI") -> None:
-    user_info = db_query("SELECT first_name, phone, username, is_reseller, is_vip FROM users WHERE user_id=?", (user_id,), fetchone=True)
-    
-    name = user_info[0] if user_info else "Unknown"
-    phone = user_info[1] if user_info and user_info[1] else "Not Provided"
-    username = f"@{user_info[2]}" if user_info and user_info[2] else "None"
-    
-    tags = []
-    if user_info and user_info[3]: tags.append("👑 Reseller")
-    if user_info and user_info[4]: tags.append("🌟 VIP")
-    tag_str = " | ".join(tags) if tags else "👤 Regular"
-        
-    time_now = datetime.now().strftime("%d-%m-%Y %I:%M %p")
-    
-    if notif_type == "ORDER":
-        title = "🛒 <b>NEW ORDER PROCESSED!</b> 🛒"
-        details = (f"📦 <b>Product:</b> {product}\n🔑 <b>Key:</b> <code>{key}</code>\n💰 <b>Amount Paid:</b> ₹{amount:.2f}\n📅 <b>Time:</b> {time_now}")
+def should_auto_restart(server_id):
+    if server_id not in CRASH_COUNT:
+        CRASH_COUNT[server_id] = {'count': 0, 'last_crash': time.time()}
+    crash_info = CRASH_COUNT[server_id]
+    if time.time() - crash_info['last_crash'] < 60:
+        if crash_info['count'] >= 3:
+            return False
     else:
-        title = "💰 <b>NEW WALLET DEPOSIT!</b> 💰"
-        details = (f"💵 <b>Amount Added:</b> ₹{amount:.2f}\n🧾 <b>Gateway:</b> {gateway}\n🆔 <b>Reference:</b> <code>{product}</code>\n📅 <b>Time:</b> {time_now}")
+        crash_info['count'] = 0
+    crash_info['count'] += 1
+    crash_info['last_crash'] = time.time()
+    return True
 
-    msg = f"{title}\n━━━━━━━━━━━━━━━━━━\n👤 <b>Name:</b> {name}\n🆔 <b>User ID:</b> <code>{user_id}</code>\n📱 <b>Phone:</b> {phone}\n🔗 <b>Username:</b> {username}\n🏷 <b>Status:</b> {tag_str}\n━━━━━━━━━━━━━━━━━━\n{details}"
-    try: 
-        await bot.send_message(ADMIN_ID, msg, parse_mode='HTML')
-    except Exception as e: 
-        logger.error(f"Failed to send admin notification: {e}")
+# ============================================
+# হেল্পার
+# ============================================
 
-# ==============================================================================
-# 9. PAYMENT VERIFIER
-# ==============================================================================
-async def run_payment_verification(user_id: int, order_id: str, reply_target: Any) -> None:
-    txn = db_query("SELECT amount_inr, status, timestamp FROM transactions WHERE order_id=?", (order_id,), fetchone=True)
-    if not txn:
-        err = "❌ Invalid or Fake Order ID detected in system!"
-        if isinstance(reply_target, CallbackQuery): await reply_target.answer(err, show_alert=True)
-        else: await reply_target.answer(err)
-        return
-        
-    if time.time() - txn[2] > 900 and txn[1] == 'pending':
-        db_query("UPDATE transactions SET status='expired' WHERE order_id=?", (order_id,))
-        err_msg = "⏳ <b>Payment Timed Out!</b>\nThe 15-minute verification window has expired."
-        if isinstance(reply_target, CallbackQuery): await reply_target.message.edit_text(err_msg, reply_markup=back_kb(), parse_mode='HTML')
-        else: await reply_target.answer(err_msg, reply_markup=back_kb())
-        return
+def generate_random_password(length=10):
+    chars = string.ascii_letters + string.digits
+    return ''.join(random.choices(chars, k=length))
 
-    if txn[1] == 'paid':
-        msg = "✅ This payment has already been securely credited to your wallet."
-        if isinstance(reply_target, CallbackQuery): await reply_target.answer(msg, show_alert=True)
-        else: await reply_target.answer(msg)
-        return
-    elif txn[1] == 'expired':
-        msg = "❌ This order has expired. Please create a new deposit request."
-        if isinstance(reply_target, CallbackQuery): await reply_target.answer(msg, show_alert=True)
-        else: await reply_target.answer(msg)
-        return
-        
-    api_key_check = db_query("SELECT value FROM settings WHERE key='zapupi_api'", fetchone=True)
-    if not api_key_check:
-        msg = "⚠️ Gateway API key missing. Administrator needs to configure it."
-        if isinstance(reply_target, CallbackQuery): await reply_target.answer(msg, show_alert=True)
-        else: await reply_target.answer(msg)
-        return
-        
-    api_key = api_key_check[0]
-    url = "https://pay.zapupi.com/api/order-status"
-    payload = {"zap_key": api_key, "order_id": order_id}
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        default = {"admin": {"password": "nero23", "role": "nero"}}
+        save_users(default)
+        return default
+    with open(USERS_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if 'admin' not in data:
+        data['admin'] = {"password": "nero23", "role": "nero"}
+        save_users(data)
+    return data
+
+def save_users(data):
+    with open(USERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+def get_server_dir(server_id):
+    server_dir = os.path.join(BOTS_DIR, server_id)
+    os.makedirs(server_dir, exist_ok=True)
+    return server_dir
+
+def check_server_valid(server_id):
+    users = load_users()
+    for uname, data in users.items():
+        if uname == 'admin': continue
+        servers = data.get('servers', [])
+        if not isinstance(servers, list): continue
+        for s in servers:
+            if isinstance(s, dict) and s.get('server_id') == server_id:
+                expiry = s.get('expiry', '')
+                if expiry:
+                    try:
+                        exp_date = datetime.strptime(expiry, '%Y-%m-%d %H:%M:%S.%f')
+                        if datetime.now() > exp_date:
+                            return False, "expired"
+                    except: pass
+                return True, s
+    return False, "deleted"
+
+def get_server_by_id(server_id):
+    users = load_users()
+    for uname, data in users.items():
+        if uname == 'admin': continue
+        servers = data.get('servers', [])
+        if not isinstance(servers, list): continue
+        for s in servers:
+            if isinstance(s, dict) and s.get('server_id') == server_id:
+                return s, uname
+    return None, None
+
+def create_default_files(server_dir):
+    main_py = os.path.join(server_dir, 'main.py')
+    if not os.path.exists(main_py):
+        with open(main_py, 'w', encoding='utf-8') as f:
+            f.write('''# NERO HOSTING - Default Bot
+import time
+
+print("=" * 40)
+print("Bot is running on NERO HOSTING")
+print("Server is ready!")
+print("=" * 40)
+
+counter = 0
+while True:
+    counter += 1
+    print(f"[{time.strftime('%H:%M:%S')}] Heartbeat #{counter} | Server active")
+    time.sleep(10)
+''')
     
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, json=payload) as resp:
-                if resp.status == 200:
-                    try: res_json = await resp.json(content_type=None)
-                    except Exception: res_json = {}
-                        
-                    if res_json.get("status") == "success":
-                        txn_data = res_json.get("data", {})
-                        real_status = txn_data.get("status", "Pending")
-                        
-                        if real_status == "Success":
-                            db_query("UPDATE transactions SET status='paid' WHERE order_id=?", (order_id,))
-                            db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (txn[0], user_id))
-                            
-                            success_msg = f"🎉 <b>VERIFICATION SUCCESSFUL!</b>\n\n✅ {fmt_curr(txn[0])} has been added to your wallet securely."
-                            if isinstance(reply_target, CallbackQuery): await reply_target.message.edit_text(success_msg, reply_markup=back_kb(), parse_mode='HTML')
-                            else: await reply_target.answer(success_msg, reply_markup=back_kb())
-                            
-                            await send_advanced_notification(user_id, "DEPOSIT", txn[0], product=order_id, gateway="ZapUPI")
-                            log_activity(user_id, "DEPOSIT_SUCCESS", f"Amount: {txn[0]}, Gateway: ZapUPI, Order: {order_id}")
-                            
-                        elif real_status == "Pending":
-                            fail_msg = "⏳ Payment is still Pending at the gateway. Please wait a minute and try clicking manual verify again."
-                            if isinstance(reply_target, CallbackQuery): await reply_target.answer(fail_msg, show_alert=True)
-                            else: await reply_target.answer(fail_msg)
-                        else:
-                            fail_msg = f"❌ Payment Failed or Cancelled (Gateway Status: {real_status})."
-                            if isinstance(reply_target, CallbackQuery): await reply_target.answer(fail_msg, show_alert=True)
-                            else: await reply_target.answer(fail_msg)
-                    else:
-                        err = f"⚠️ Gateway Error: {res_json.get('message', 'Unknown Error')}"
-                        if isinstance(reply_target, CallbackQuery): await reply_target.answer(err, show_alert=True)
-                        else: await reply_target.answer(err)
-                else:
-                    err = f"⚠️ Gateway HTTP Error: {resp.status}. Gateway might be down."
-                    if isinstance(reply_target, CallbackQuery): await reply_target.answer(err, show_alert=True)
-                    else: await reply_target.answer(err)
-        except Exception as e:
-            logger.error(f"ZapUPI API Error: {str(e)}")
-            err = f"⚠️ Unable to connect to Gateway API: Network Issue."
-            if isinstance(reply_target, CallbackQuery): await reply_target.answer(err, show_alert=True)
-            else: await reply_target.answer(err)
+    req_file = os.path.join(server_dir, 'requirements.txt')
+    if not os.path.exists(req_file):
+        with open(req_file, 'w', encoding='utf-8') as f:
+            f.write('# Add your pip packages here\n')
 
-async def auto_verify_task() -> None:
-    while True:
-        await asyncio.sleep(15) 
-        api_key_check = db_query("SELECT value FROM settings WHERE key='zapupi_api'", fetchone=True)
-        if not api_key_check or not api_key_check[0]: continue
+# ============================================
+# বট রান
+# ============================================
+
+def run_bot(server_id, main_file='main.py', requirements_file='requirements.txt'):
+    server_dir = get_server_dir(server_id)
+    main_path = os.path.join(server_dir, main_file)
+    log_file = os.path.join(server_dir, 'output.log')
+    python_exe = sys.executable
+    
+    def log(msg):
+        try:
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(f"{msg}\n")
+                f.flush()
+        except: pass
+    
+    if not os.path.exists(main_path):
+        return None, f"ERROR: {main_file} not found!"
+    
+    if os.path.exists(log_file):
+        try: os.remove(log_file)
+        except: open(log_file, 'w').close()
+    
+    ts = lambda: datetime.now().strftime('%I:%M:%S %p')
+    
+    server, _ = get_server_by_id(server_id)
+    cpu_limit = server.get('cpu_limit', 80) if server else 80
+    log(f"[{ts()}] Checking rate limit...")
+    log(f"[{ts()}] Rate limit: {cpu_limit}%")
+    log("")
+    
+    if requirements_file and requirements_file.strip():
+        req_path = os.path.join(server_dir, requirements_file.strip())
+        log(f"[{ts()}] Run: pip install -r {requirements_file}")
+        log("")
+        
+        if os.path.exists(req_path):
+            with open(req_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
             
-        api_key = api_key_check[0]
-        pending_txns = db_query("SELECT order_id, user_id, amount_inr, timestamp FROM transactions WHERE status='pending'", fetchall=True)
-        if not pending_txns: continue
-
-        for txn in pending_txns:
-            order_id, user_id, amount, ts = txn
-            if time.time() - ts > 900:
-                db_query("UPDATE transactions SET status='expired' WHERE order_id=?", (order_id,))
-                try: await bot.send_message(user_id, f"⏳ <b>Order Expired!</b>\nYour payment window for order <code>{order_id}</code> has timed out.", parse_mode='HTML')
-                except: pass
-                continue
-
-            url = "https://pay.zapupi.com/api/order-status"
-            payload = {"zap_key": api_key, "order_id": order_id}
-            async with aiohttp.ClientSession() as session:
+            lines = [l.strip() for l in content.split('\n') if l.strip() and not l.strip().startswith('#')]
+            
+            if lines:
                 try:
-                    async with session.post(url, json=payload) as resp:
-                        if resp.status == 200:
-                            try: res_json = await resp.json(content_type=None)
-                            except Exception: res_json = {}
-                            if res_json.get("status") == "success":
-                                real_status = res_json.get("data", {}).get("status", "")
-                                if real_status == "Success":
-                                    db_query("UPDATE transactions SET status='paid' WHERE order_id=?", (order_id,))
-                                    db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
-                                    try: await bot.send_message(user_id, f"✨ <b>AUTO-VERIFIED!</b>\n\n✅ Your payment was detected successfully. {fmt_curr(amount)} has been added to your balance!", parse_mode='HTML')
-                                    except: pass
-                                    await send_advanced_notification(user_id, "DEPOSIT", amount, product=order_id, gateway="ZapUPI Auto")
-                                    log_activity(user_id, "DEPOSIT_AUTO_SUCCESS", f"Amount: {amount}, Gateway: ZapUPI Auto, Order: {order_id}")
-                except Exception as e: 
-                    logger.debug(f"Auto-verify minor exception ignored: {e}")
-
-# ==============================================================================
-# 10. ONBOARDING & START
-# ==============================================================================
-@dp.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-    try: await message.answer_sticker(WELCOME_STICKER_ID)
-    except: pass 
+                    proc = subprocess.Popen(
+                        [python_exe, '-m', 'pip', 'install', '-r', os.path.abspath(req_path), '--disable-pip-version-check'],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1, universal_newlines=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    )
+                    
+                    for line in iter(proc.stdout.readline, ''):
+                        if line.strip():
+                            log(f"[{ts()}] {line.rstrip()}")
+                    
+                    proc.wait()
+                    log("")
+                    
+                    if proc.returncode != 0:
+                        log(f"[{ts()}] Some packages failed to install")
+                    else:
+                        log(f"[{ts()}] Requirements installation complete!")
+                except Exception as e:
+                    log(f"[{ts()}] pip error: {str(e)}")
+            else:
+                log(f"[{ts()}] {requirements_file} is empty, skipping...")
+        else:
+            log(f"[{ts()}] {requirements_file} not found, skipping...")
+    else:
+        log(f"[{ts()}] No requirements file set, skipping...")
     
-    args = message.text.split()
-    if len(args) > 1 and args[1].startswith("v_"):
-        order_id = args[1].split("v_")[1]
-        msg = await message.answer("🔄 <b>Verifying your payment securely...</b>\n<i>Connecting to gateway...</i>", parse_mode='HTML')
-        await run_payment_verification(message.from_user.id, order_id, msg)
-        return
-
-    referred_by = None
-    if len(args) > 1 and args[1].startswith("ref_"):
-        try: referred_by = int(args[1].split("_")[1])
-        except: pass
-
-    user = db_query("SELECT phone FROM users WHERE user_id=?", (message.from_user.id,), fetchone=True)
-    current_username = message.from_user.username or ""
-    db_query("UPDATE users SET username=? WHERE user_id=?", (current_username, message.from_user.id))
-
-    if not user or not user[0]:
-        db_query("INSERT OR IGNORE INTO users (user_id, first_name, username, referred_by, joined_date) VALUES (?, ?, ?, ?, ?)", 
-                 (message.from_user.id, message.from_user.first_name, current_username, referred_by, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        log_activity(message.from_user.id, "ACCOUNT_CREATED")
-        await message.answer("<b>🛡 VERIFICATION REQUIRED</b>\n\nTo safeguard your orders and account, we need to verify you.\n👇 <b>Tap the button below:</b>", parse_mode='HTML', reply_markup=contact_kb())
-    else:
-        log_activity(message.from_user.id, "CMD_START")
-        await send_main_menu(message)
-
-@dp.message(F.contact)
-async def handle_contact(message: Message):
-    if message.contact.user_id == message.from_user.id:
-        db_query("UPDATE users SET phone=? WHERE user_id=?", (message.contact.phone_number, message.from_user.id))
-        referrer = db_query("SELECT referred_by FROM users WHERE user_id=?", (message.from_user.id,), fetchone=True)
-        if referrer and referrer[0]:
-            db_query("UPDATE users SET referrals_count = referrals_count + 1 WHERE user_id=?", (referrer[0],))
-            try: await bot.send_message(referrer[0], f"🎉 <b>Referral Success!</b>\nUser <b>{message.from_user.first_name}</b> joined using your link!", parse_mode='HTML')
-            except: pass
-        log_activity(message.from_user.id, "CONTACT_VERIFIED")
-        await message.answer("✅ Verification successful! Welcome to the system.", reply_markup=ReplyKeyboardRemove())
-        await send_main_menu(message)
-    else:
-        await message.answer("❌ Security Alert: Please share your OWN contact using the provided button.")
-
-async def send_main_menu(ctx: Any):
-    text = get_ui_text("start_menu")
-    kb = main_menu_kb(ctx.from_user.id)
-    if isinstance(ctx, Message): 
-        await ctx.answer(text, reply_markup=kb, parse_mode='HTML')
-    else: 
-        await ctx.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data == "back_main")
-async def back_main(call: CallbackQuery, state: FSMContext):
-    await state.clear()
-    log_activity(call.from_user.id, "RETURN_MAIN_MENU")
-    await send_main_menu(call)
-
-# ==============================================================================
-# 11. ADD BALANCE
-# ==============================================================================
-@dp.callback_query(F.data == "menu_add_balance")
-async def select_gateway_menu(call: CallbackQuery):
-    log_activity(call.from_user.id, "VIEW_ADD_BALANCE")
-    text = get_ui_text("add_balance_menu")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="UPI PAY", callback_data="gateway_inr", icon_custom_emoji_id=get_emoji_icon("upi"), style="primary"),
-            InlineKeyboardButton(text="BINANCE PAY", callback_data="gateway_crypto", icon_custom_emoji_id=get_emoji_icon("binance"), style="primary")
-        ],
-        [
-            InlineKeyboardButton(text="BACK", callback_data="back_main", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")
-        ]
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-# ==============================================================================
-# 12. UPI & CRYPTO PAYMENT FLOWS
-# ==============================================================================
-@dp.callback_query(F.data == "gateway_inr")
-async def add_balance_inr(call: CallbackQuery):
-    text = f"💵 <b>— ZAPUPI DEPOSIT —</b> 💵\n\nSelect amount to deposit:"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="₹50", callback_data="pay_50", style="primary"), InlineKeyboardButton(text="₹100", callback_data="pay_100", style="primary")],
-        [InlineKeyboardButton(text="₹200", callback_data="pay_200", style="primary"), InlineKeyboardButton(text="₹500", callback_data="pay_500", style="primary")],
-        [InlineKeyboardButton(text="✏️ Custom Amount", callback_data="custom_deposit_keypad", style="primary")],
-        [InlineKeyboardButton(text="Back", callback_data="menu_add_balance", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data == "custom_deposit_keypad")
-async def show_custom_keypad(call: CallbackQuery, state: FSMContext):
-    await state.set_state(UserStates.custom_amount_input)
-    await state.update_data(amount_str="0")
-    await show_keypad(call.message)
-
-async def show_keypad(message: Message, amount_str: str = "0"):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="      1      ", callback_data="kp_1", style="primary"), InlineKeyboardButton(text="      2      ", callback_data="kp_2", style="primary"), InlineKeyboardButton(text="      3      ", callback_data="kp_3", style="primary")],
-        [InlineKeyboardButton(text="      4      ", callback_data="kp_4", style="primary"), InlineKeyboardButton(text="      5      ", callback_data="kp_5", style="primary"), InlineKeyboardButton(text="      6      ", callback_data="kp_6", style="primary")],
-        [InlineKeyboardButton(text="      7      ", callback_data="kp_7", style="primary"), InlineKeyboardButton(text="      8      ", callback_data="kp_8", style="primary"), InlineKeyboardButton(text="      9      ", callback_data="kp_9", style="primary")],
-        [InlineKeyboardButton(text="    ⌫    ", callback_data="kp_backspace", style="danger"), InlineKeyboardButton(text="      0      ", callback_data="kp_0", style="primary"), InlineKeyboardButton(text="    C    ", callback_data="kp_clear", style="danger")],
-        [InlineKeyboardButton(text=f"✅ Confirm (₹{amount_str})", callback_data="kp_confirm", style="success")],
-        [InlineKeyboardButton(text="Cancel", callback_data="gateway_inr", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    text = f"💵 <b>Enter Amount (₹):</b>\n\nCurrent: ₹{amount_str}"
-    await message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("kp_"), UserStates.custom_amount_input)
-async def keypad_handler(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    amount_str = data.get("amount_str", "0")
-    action = call.data.split("_")[1]
-    if action == "confirm":
-        if amount_str == "0":
-            await call.answer("Amount cannot be zero.", show_alert=True)
-            return
-        try:
-            amount = float(amount_str)
-            if amount < 10:
-                await call.answer("Minimum deposit is ₹10.", show_alert=True)
-                return
-            await state.clear()
-            await call.message.edit_text("⏳ <b>Generating Secure Link...</b>", parse_mode='HTML')
-            await generate_zapupi_order(call.from_user.id, amount, call.message)
-        except ValueError:
-            await call.answer("Invalid amount.", show_alert=True)
-        return
-    if action == "backspace":
-        if len(amount_str) > 1: amount_str = amount_str[:-1]
-        else: amount_str = "0"
-    elif action == "clear":
-        amount_str = "0"
-    else:
-        if amount_str == "0": amount_str = action
-        else: amount_str += action
-        if len(amount_str) > 6: amount_str = amount_str[:6]
-    await state.update_data(amount_str=amount_str)
-    await show_keypad(call.message, amount_str)
-    await call.answer()
-
-@dp.callback_query(F.data.startswith("pay_"))
-async def process_zapupi_payment_callback(call: CallbackQuery):
-    inr_amount = float(call.data.split("_")[1])
-    await call.message.edit_text("⏳ <b>Generating Secure Link via ZapUPI...</b>", parse_mode='HTML')
-    await generate_zapupi_order(call.from_user.id, inr_amount, call.message)
-
-async def generate_zapupi_order(user_id: int, inr_amount: float, message_obj: Message) -> None:
-    api_key_check = db_query("SELECT value FROM settings WHERE key='zapupi_api'", fetchone=True)
-    if not api_key_check or not api_key_check[0]:
-        return await message_obj.edit_text("⚠️ ZapUPI Gateway is currently offline. Admin needs to set API Key.", reply_markup=back_kb("gateway_inr"), parse_mode='HTML')
+    log("")
+    log(f"[{ts()}] Run: python {main_file}")
+    log(f"[{ts()}] Python {sys.version.split()[0]}")
+    log("")
+    
+    try:
+        main_path_abs = os.path.abspath(main_path)
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        env['PYTHONUNBUFFERED'] = '1'
         
-    api_key = api_key_check[0]
-    current_time = int(time.time())
-    order_id = f"NXT{user_id}{current_time}"
-    user_phone = db_query("SELECT phone FROM users WHERE user_id=?", (user_id,), fetchone=True)
-    mobile = user_phone[0] if user_phone and user_phone[0] else "9999999999"
-    bot_deep_link = f"https://t.me/{BOT_USERNAME}?start=v_{order_id}"
-    
-    db_query("INSERT INTO transactions (order_id, user_id, amount_inr, status, timestamp) VALUES (?, ?, ?, 'pending', ?)", (order_id, user_id, inr_amount, current_time))
-    payment_url = ""
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            url = "https://pay.zapupi.com/api/create-order"
-            payload = {"zap_key": api_key, "order_id": order_id, "amount": str(inr_amount), "customer_mobile": mobile, "remark": "Wallet Topup", "success_url": bot_deep_link, "failed_url": f"https://t.me/{BOT_USERNAME}", "timeout_url": f"https://t.me/{BOT_USERNAME}", "webhook_url": f"https://t.me/{BOT_USERNAME}"}
-            async with session.post(url, json=payload) as resp:
-                if resp.status == 200:
-                    try: res_data = await resp.json(content_type=None)
-                    except: res_data = {}
-                    if res_data.get("status") == "success": payment_url = res_data.get("payment_url")
-                    else: return await message_obj.edit_text(f"❌ <b>Gateway Data Error:</b> {res_data.get('message', 'Unknown structure.')}", reply_markup=back_kb("gateway_inr"), parse_mode='HTML')
-                else: return await message_obj.edit_text(f"❌ <b>Gateway Server Error:</b> HTTP {resp.status}", reply_markup=back_kb("gateway_inr"), parse_mode='HTML')
-        except Exception as e:
-            return await message_obj.edit_text(f"❌ <b>API Connection Error:</b> {str(e)}", reply_markup=back_kb("gateway_inr"), parse_mode='HTML')
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Pay Now (Auto Redirects)", url=payment_url, style="success")],
-        [InlineKeyboardButton(text="🔄 Manual Verify", callback_data=f"verify_{order_id}", style="primary")],
-        [InlineKeyboardButton(text="Cancel Transaction", callback_data="menu_add_balance", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    text = (f"🧾 <b>SECURE INVOICE CREATED</b>\n\nAmount: <b>₹{inr_amount:.2f}</b>\nOrder ID: <code>{order_id}</code>\n⏳ <b>Timer:</b> 15:00 Minutes\n\n1️⃣ Click <b>Pay Now</b> to open UPI Gateway.\n2️⃣ Complete the payment in your app.\n3️⃣ <b>Auto-Verify:</b> Return to the bot after payment! ✨")
-    log_activity(user_id, "GENERATE_INVOICE", f"Amount: {inr_amount}, Order ID: {order_id}")
-    await message_obj.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("verify_"))
-async def manual_verify_callback(call: CallbackQuery):
-    order_id = call.data.split("_", 1)[1]
-    await run_payment_verification(call.from_user.id, order_id, call)
-
-@dp.callback_query(F.data == "gateway_crypto")
-async def add_balance_crypto(call: CallbackQuery, state: FSMContext):
-    address_check = db_query("SELECT value FROM settings WHERE key='binance_address'", fetchone=True)
-    if not address_check or not address_check[0]:
-        return await call.message.edit_text("⚠️ Binance Gateway is currently offline. Admin has not set a deposit address.", reply_markup=back_kb("menu_add_balance"), parse_mode='HTML')
-    deposit_address = address_check[0]
-    msg = (f"🪙 <b>— BINANCE USDT DEPOSIT —</b> 🪙\n\n💵 <b>Exchange Rate:</b> 1 USDT = ₹{USDT_TO_INR}\n⚠️ <b>Network:</b> Please send via <b>TRC20</b> or <b>BEP20</b>.\n\n👇 <b>Send your USDT to this exact address:</b>\n<code>{deposit_address}</code>\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>After sending the USDT, reply to this message with your exact TxID (Transaction Hash) to instantly claim your balance.</b>")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Cancel", callback_data="menu_add_balance", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]])
-    await call.message.edit_text(msg, reply_markup=kb, parse_mode='HTML')
-    await state.set_state(UserStates.wait_for_crypto_txid)
-
-@dp.message(UserStates.wait_for_crypto_txid)
-async def process_crypto_txid(m: Message, state: FSMContext):
-    txid = m.text.strip()
-    user_id = m.from_user.id
-    if len(txid) < 10: return await m.answer("❌ That doesn't look like a valid TxID. Please try again.")
-    if db_query("SELECT txid FROM crypto_txns WHERE txid=?", (txid,), fetchone=True):
-        return await m.answer("⚠️ This Transaction ID has already been claimed in the system!", reply_markup=back_kb("menu_add_balance"), parse_mode='HTML')
-    api_key_check = db_query("SELECT value FROM settings WHERE key='binance_api'", fetchone=True)
-    secret_key_check = db_query("SELECT value FROM settings WHERE key='binance_secret'", fetchone=True)
-    if not api_key_check or not secret_key_check:
-        return await m.answer("⚠️ Binance API is missing on the server. Contact Support.", reply_markup=back_kb("menu_add_balance"), parse_mode='HTML')
-    await m.answer("🔄 <b>Verifying your TxID with Binance Blockchain...</b>\n<i>This may take up to 30 seconds...</i>", parse_mode='HTML')
-    api_key = api_key_check[0]; secret_key = secret_key_check[0]
-    timestamp = int(time.time() * 1000)
-    query_string = f"timestamp={timestamp}"
-    signature = hmac.new(secret_key.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
-    headers = {'X-MBX-APIKEY': api_key}
-    url = f"https://api.binance.com/sapi/v1/capital/deposit/hisrec?{query_string}&signature={signature}"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    try: history = await resp.json(content_type=None)
-                    except: history = []
-                    found = False
-                    for deposit in history:
-                        if deposit.get("txId") == txid and deposit.get("status") == 1:
-                            found = True
-                            usdt_amount = float(deposit.get("amount"))
-                            inr_amount = usdt_amount * USDT_TO_INR
-                            db_query("INSERT INTO crypto_txns (txid, user_id, amount_usdt, timestamp) VALUES (?, ?, ?, ?)", (txid, user_id, usdt_amount, int(time.time())))
-                            db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (inr_amount, user_id))
-                            await m.answer(f"🎉 <b>CRYPTO DEPOSIT SUCCESSFUL!</b>\n\n✅ We safely received <b>{usdt_amount} USDT</b>.\n💰 <b>{fmt_curr(inr_amount)}</b> has been added to your balance!", reply_markup=main_menu_kb(m.from_user.id), parse_mode='HTML')
-                            await send_advanced_notification(user_id, "DEPOSIT", inr_amount, product=txid, gateway="Binance Crypto")
-                            log_activity(user_id, "CRYPTO_DEPOSIT", f"TxID: {txid}, Amount: {inr_amount}")
-                            await state.clear()
-                            break
-                    if not found: await m.answer("❌ <b>TxID Not Found or Still Pending!</b>\nMake sure the transaction is fully confirmed. Try again in 5 mins.", reply_markup=back_kb("menu_add_balance"), parse_mode='HTML')
-                else: await m.answer(f"⚠️ <b>Binance Server Error:</b> HTTP {resp.status}.", reply_markup=back_kb("menu_add_balance"), parse_mode='HTML')
-        except Exception as e: await m.answer(f"⚠️ <b>Connection Error:</b> {str(e)}", reply_markup=back_kb("menu_add_balance"), parse_mode='HTML')
-
-# ==============================================================================
-# 13. SHOP – with uppercase categories and new point_down emoji
-# ==============================================================================
-@dp.callback_query(F.data == "menu_shop")
-async def view_shop_panels(call: CallbackQuery):
-    log_activity(call.from_user.id, "VIEW_SHOP")
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    text = f"{get_emoji('product_store')} <b><u>SELECT PRODUCT PANEL</u></b>\n━━━━━━━━━━━━━━━━━━\n\n{get_emoji('point_down')} <b>Choose a panel to view its packages:</b>"
-    for cat in FIXED_CATEGORIES:
-        count = db_query("SELECT COUNT(*) FROM products WHERE category LIKE ? AND is_active=1", (cat + '%',), fetchone=True)[0]
-        emoji_id = get_category_emoji(cat)
-        kb.inline_keyboard.append([InlineKeyboardButton(text=cat, callback_data=f"cat_{cat[:30]}", icon_custom_emoji_id=emoji_id, style="primary")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="BACK", callback_data="back_main", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("cat_"))
-async def view_panel_names(call: CallbackQuery):
-    category = call.data.split("cat_", 1)[1]
-    panel_names = db_query("SELECT DISTINCT panel_name FROM products WHERE category LIKE ? AND is_active=1 AND panel_name != ''", (category + '%',), fetchall=True)
-    if not panel_names:
-        prods = db_query("SELECT id, name, price_inr, stock, reseller_price, validity, device_limit FROM products WHERE category LIKE ? AND is_active=1", (category + '%',), fetchall=True)
-        if not prods: return await call.answer("❌ No products available in this category yet.", show_alert=True)
-        await show_products_for_panel(call, prods, category)
-        return
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    text = f"{get_emoji('product_store')} <b><u>{category.upper()} PANELS</u></b>\n━━━━━━━━━━━━━━━━━━\n\n{get_emoji('point_down')} <b>Choose a panel name:</b>"
-    for pn in panel_names:
-        panel = pn[0]
-        emoji_id = get_panel_emoji(panel) or get_emoji_icon("product_store")
-        kb.inline_keyboard.append([InlineKeyboardButton(text=panel, callback_data=f"pnl_{category[:30]}_{panel[:30]}", icon_custom_emoji_id=emoji_id, style="primary")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="BACK TO PANELS", callback_data="menu_shop", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("pnl_"))
-async def view_products_for_panel(call: CallbackQuery):
-    parts = call.data.split("pnl_", 1)[1].split("_", 1)
-    if len(parts) != 2: return await call.answer("Invalid selection.", show_alert=True)
-    category, panel_name = parts[0], parts[1]
-    prods = db_query("SELECT id, name, price_inr, stock, reseller_price, validity, device_limit FROM products WHERE category LIKE ? AND panel_name LIKE ? AND is_active=1", (category + '%', panel_name + '%'), fetchall=True)
-    if not prods: return await call.answer("No products found for this panel.", show_alert=True)
-    await show_products_for_panel(call, prods, f"{category} - {panel_name}")
-
-async def show_products_for_panel(call: CallbackQuery, prods: List[Tuple], header: str):
-    user = db_query("SELECT is_reseller, is_vip FROM users WHERE user_id=?", (call.from_user.id,), fetchone=True)
-    is_reseller = bool(user[0]) if user else False
-    is_vip = bool(user[1]) if user else False
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    text = f"{get_emoji('product_store')} <b><u>{header.upper()} PACKAGES</u></b>\n━━━━━━━━━━━━━━━━━━\n\n"
-    for p in prods:
-        prod_id, package_name, normal_price, stock, reseller_price, validity, device = p
-        normal_price = safe_float(normal_price)
-        reseller_price = safe_float(reseller_price)
-        base_price = reseller_price if is_reseller else normal_price
-        if is_vip: display_price = base_price - (base_price * (VIP_DISCOUNT_PERCENTAGE / 100))
-        else: display_price = base_price
-        stock_status = "✅ In Stock" if stock > 0 else "❌ Out of Stock"
-        text += f"{get_emoji('product_store')} ⏱ <b>Validity: {package_name}</b>\n"
-        if is_reseller or is_vip:
-            text += f"💰 Regular Price: <s>{fmt_curr(normal_price)}</s>\n"
-            if is_reseller and not is_vip: text += f"👑 <b>Reseller Price: {fmt_curr(display_price)}</b>\n"
-            elif is_vip and not is_reseller: text += f"🌟 <b>VIP Price: {fmt_curr(display_price)}</b>\n"
-            else: text += f"👑🌟 <b>Super Price: {fmt_curr(display_price)}</b>\n"
-        else: text += f"💰 Price: {fmt_curr(normal_price)}\n"
-        text += f"📱 Limit: {device} | 📦 {stock_status}\n\n"
-        if stock > 0:
-            kb.inline_keyboard.append([InlineKeyboardButton(text=f"Buy {package_name} - {fmt_curr(display_price)}", callback_data=f"buy_{prod_id}", icon_custom_emoji_id=get_emoji_icon("product_store"), style="success")])
-        else:
-            kb.inline_keyboard.append([InlineKeyboardButton(text=f"❌ {package_name} (Out of Stock)", callback_data="ignore_stock_click", style="danger")])
-    text += f"{get_emoji('point_down')} <b>Select package below to instantly purchase:</b>"
-    kb.inline_keyboard.append([InlineKeyboardButton(text="BACK TO PANELS", callback_data="menu_shop", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data == "ignore_stock_click")
-async def ignore_stock_click(call: CallbackQuery):
-    await call.answer("⚠️ This duration is completely Out of Stock! Admins have been notified to refill.", show_alert=True)
-
-@dp.callback_query(F.data.startswith("buy_"))
-async def process_buy(call: CallbackQuery):
-    prod_id = int(call.data.split("_")[1])
-    prod = db_query("SELECT name, price_inr, stock, apk_link, validity, device_limit, category, reseller_price, panel_name FROM products WHERE id=?", (prod_id,), fetchone=True)
-    user = db_query("SELECT balance, referred_by, is_reseller, total_saved, is_vip FROM users WHERE user_id=?", (call.from_user.id,), fetchone=True)
-    if not prod: return await call.answer("❌ Critical Error: Item not found in DB!", show_alert=True)
-    normal_price = safe_float(prod[1])
-    reseller_price = safe_float(prod[7])
-    is_reseller = bool(user[2]); is_vip = bool(user[4])
-    base_price = reseller_price if is_reseller else normal_price
-    if is_vip: final_price = base_price - (base_price * (VIP_DISCOUNT_PERCENTAGE / 100))
-    else: final_price = base_price
-    savings = normal_price - final_price
-    if user[0] < final_price: return await call.answer(f"❌ Insufficient Balance! You need {fmt_curr(final_price)}.\nPlease Top Up your wallet.", show_alert=True)
-    db_query("UPDATE users SET balance=?, spent=spent+?, orders_count=orders_count+1, total_saved=total_saved+? WHERE user_id=?", (user[0] - final_price, final_price, savings, call.from_user.id))
-    delivered_key = ""
-    if prod[2] > 0:
-        key_data = db_query("SELECT id, key_text FROM product_keys WHERE product_id=? AND is_used=0 LIMIT 1", (prod_id,), fetchone=True)
-        if key_data:
-            delivered_key = key_data[1]
-            db_query("UPDATE product_keys SET is_used=1 WHERE id=?", (key_data[0],))
-            db_query("UPDATE products SET stock=stock-1 WHERE id=?", (prod_id,))
-        else: delivered_key = "OUT_OF_STOCK_CONTACT_ADMIN_CODE_01"
-    else: delivered_key = "OUT_OF_STOCK_CONTACT_ADMIN_CODE_02"
-    if user[1]: 
-        commission = final_price * 0.15 
-        db_query("UPDATE users SET balance=balance+?, referral_earned=referral_earned+? WHERE user_id=?", (commission, commission, user[1]))
-        try: await bot.send_message(user[1], f"🎁 <b>Referral Bonus Added!</b>\nYour friend made a successful purchase. You earned {fmt_curr(commission)} directly to your wallet!", parse_mode='HTML')
-        except: pass
-    product_full_name = f"{prod[6]} - {prod[8]} ({prod[0]})"
-    db_query("INSERT INTO orders (user_id, product_name, price_paid, delivered_key, purchase_date) VALUES (?, ?, ?, ?, ?)", (call.from_user.id, product_full_name, final_price, delivered_key, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    log_activity(call.from_user.id, "PURCHASE_SUCCESS", f"Product: {product_full_name}, Paid: {final_price}")
-    await send_advanced_notification(call.from_user.id, "ORDER", final_price, product=product_full_name, key=delivered_key)
-    msg = (f"✅ <b>PURCHASE SUCCESSFUL!</b>\n━━━━━━━━━━━━━━━━━━\n📦 <b>Panel:</b> {prod[6]}\n📁 <b>Panel Name:</b> {prod[8]}\n⏱ <b>Package:</b> {prod[0]}\n💰 <b>Amount Deducted:</b> {fmt_curr(final_price)}\n📱 <b>Device Limit:</b> {prod[5]}\n━━━━━━━━━━━━━━━━━━\n")
-    if prod[3] and prod[3].startswith("http"): msg += f"📥 <b>APK Link:</b> <a href='{prod[3]}'>Click Here to Download</a>\n\n"
-    if "OUT_OF_STOCK" in delivered_key:
-        msg += f"⚠️ <b>CRITICAL INVENTORY ALERT</b>\nYour money was deducted, but the key vault was empty. Contact Admin immediately with this message: {ADMIN_CONTACT}\n"
-    else:
-        msg += f"🔑 <b>Your Exclusive Key:</b>\n<code>{delivered_key}</code>\n\n<i>For any issues or guide, tap Support or contact: {ADMIN_CONTACT}</i>"
-    await call.message.edit_text(msg, reply_markup=back_kb("menu_shop"), disable_web_page_preview=True, parse_mode='HTML')
-
-# ==============================================================================
-# 14. USER DASHBOARD, FILES, VIP, RESELLER, ORDERS, PROFILE, REFERRAL
-# ==============================================================================
-@dp.callback_query(F.data == "menu_all_files")
-async def all_files_handler(call: CallbackQuery):
-    link_q = db_query("SELECT value FROM settings WHERE key='all_files_link'", fetchone=True)
-    link = link_q[0] if link_q and link_q[0] != 'None' else None
-    if link:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Access Download Channel ↗️", url=link, icon_custom_emoji_id=get_emoji_icon("download"), style="success")],
-            [InlineKeyboardButton(text="BACK", callback_data="back_main", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-        ])
-        text = get_ui_text("download_files")
-        await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-    else:
-        await call.answer("⚠️ Admin has not configured the private download channel link yet.", show_alert=True)
-
-@dp.callback_query(F.data == "menu_vip_dash")
-async def vip_dashboard(call: CallbackQuery):
-    u = db_query("SELECT balance, is_vip, vip_since FROM users WHERE user_id=?", (call.from_user.id,), fetchone=True)
-    is_vip = bool(u[1])
-    status_str = "🟢 Active (Lifetime)" if is_vip else "🔴 Not Subscribed"
-    text = get_ui_text("vip_menu", vip_status=status_str)
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    if is_vip:
-        text += f"\n📅 <b>Member Since:</b> {u[2]}\n\nEnjoy your permanent 15% discount!"
-    else:
-        text += f"\n\n💳 <b>Your Current Balance:</b> {fmt_curr(u[0])}\n"
-        if u[0] >= VIP_PRICE_INR: kb.inline_keyboard.append([InlineKeyboardButton(text=f"✅ Purchase VIP for {fmt_curr(VIP_PRICE_INR)}", callback_data="execute_vip_upgrade", style="success")])
-        else:
-            kb.inline_keyboard.append([InlineKeyboardButton(text=f"❌ Need {fmt_curr(VIP_PRICE_INR)} to Upgrade", callback_data="ignore_stock_click", style="danger")])
-            kb.inline_keyboard.append([InlineKeyboardButton(text="💳 Add Balance Now", callback_data="menu_add_balance", style="success")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="BACK", callback_data="back_main", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data == "execute_vip_upgrade")
-async def execute_vip_upgrade(call: CallbackQuery):
-    u = db_query("SELECT balance, is_vip FROM users WHERE user_id=?", (call.from_user.id,), fetchone=True)
-    if u[1]: return await call.answer("⚠️ You are already a VIP Member!", show_alert=True)
-    if u[0] < VIP_PRICE_INR: return await call.answer(f"❌ Your balance dropped below {VIP_PRICE_INR}.", show_alert=True)
-    new_balance = u[0] - VIP_PRICE_INR
-    now_date = datetime.now().strftime("%Y-%m-%d")
-    db_query("UPDATE users SET balance=?, is_vip=1, vip_since=? WHERE user_id=?", (new_balance, now_date, call.from_user.id))
-    log_activity(call.from_user.id, "UPGRADED_VIP")
-    try: await bot.send_message(ADMIN_ID, f"🌟 <b>NEW VIP UPGRADE</b>\n👤 User ID: <code>{call.from_user.id}</code>", parse_mode='HTML')
-    except: pass
-    await call.answer("🎉 Upgrade Successful! You are now a VIP Member.", show_alert=True)
-    await vip_dashboard(call)
-
-@dp.callback_query(F.data == "menu_reseller_dash")
-async def reseller_dashboard(call: CallbackQuery):
-    u = db_query("SELECT balance, is_reseller, reseller_since, total_saved FROM users WHERE user_id=?", (call.from_user.id,), fetchone=True)
-    status_check = db_query("SELECT value FROM settings WHERE key='reseller_system_status'", fetchone=True)
-    system_status = status_check[0] if status_check else "ON"
-    setup_fee = safe_float(get_setting("reseller_setup_fee", "200.0"))
-    min_balance = safe_float(get_setting("reseller_min_balance", "500.0"))
-    if u[1]: 
-        text = (f"{get_emoji('shield_icon')} <b><u>— RESELLER DASHBOARD —</u></b> {get_emoji('shield_icon')}\n\n🟢 <b>Status:</b> Active\n📅 <b>Since:</b> {u[2]}\n{get_emoji('money_icon')} <b>Total Saved:</b> {fmt_curr(u[3])}\n\n🎉 You are enjoying exclusive wholesale prices on all products!")
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="BACK", callback_data="back_main", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]])
-        await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-        return
-    if system_status == "OFF": return await call.answer("⚠️ Wholesale / Reseller registrations are currently closed by Admin.", show_alert=True)
-    text = (f"⚡ <b><u>— BECOME A RESELLER —</u></b> ⚡\n\nUpgrade your account to access wholesale <b>Reseller Prices</b>!\n\n📋 <b>Requirements to Upgrade:</b>\n1️⃣ Must have a minimum balance of <b>{fmt_curr(min_balance)}</b>.\n2️⃣ A one-time setup fee of <b>{fmt_curr(setup_fee)}</b> will be deducted.\n\n💳 <b>Your Current Balance:</b> {fmt_curr(u[0])}\n")
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    if u[0] >= min_balance: kb.inline_keyboard.append([InlineKeyboardButton(text=f"✅ Pay {fmt_curr(setup_fee)} & Become Reseller", callback_data="execute_reseller_upgrade", style="success")])
-    else:
-        kb.inline_keyboard.append([InlineKeyboardButton(text=f"❌ Insufficient Balance (Need {fmt_curr(min_balance)})", callback_data="ignore_stock_click", style="danger")])
-        kb.inline_keyboard.append([InlineKeyboardButton(text="💳 Add Balance", callback_data="menu_add_balance", style="success")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="BACK", callback_data="back_main", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data == "execute_reseller_upgrade")
-async def execute_reseller_upgrade(call: CallbackQuery):
-    setup_fee = safe_float(get_setting("reseller_setup_fee", "200.0"))
-    min_balance = safe_float(get_setting("reseller_min_balance", "500.0"))
-    u = db_query("SELECT balance, is_reseller FROM users WHERE user_id=?", (call.from_user.id,), fetchone=True)
-    if u[1]: return await call.answer("⚠️ You are already a Reseller!", show_alert=True)
-    if u[0] < min_balance: return await call.answer(f"❌ Your balance dropped below {fmt_curr(min_balance)}. Please top up.", show_alert=True)
-    new_balance = u[0] - setup_fee
-    db_query("UPDATE users SET balance=?, is_reseller=1, reseller_since=?, account_type='Reseller' WHERE user_id=?", (new_balance, datetime.now().strftime("%Y-%m-%d"), call.from_user.id))
-    log_activity(call.from_user.id, "UPGRADED_RESELLER")
-    try: await bot.send_message(ADMIN_ID, f"👑 <b>NEW RESELLER UPGRADE</b>\n👤 User ID: <code>{call.from_user.id}</code>", parse_mode='HTML')
-    except: pass
-    await call.answer("🎉 Upgrade Successful! Welcome to the Reseller tier.", show_alert=True)
-    await reseller_dashboard(call)
-
-@dp.callback_query(F.data == "menu_orders")
-async def my_orders(call: CallbackQuery):
-    orders = db_query("SELECT product_name, delivered_key, purchase_date, price_paid FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 10", (call.from_user.id,), fetchall=True)
-    if not orders: return await call.message.edit_text("🧾 You haven't made any purchases yet. Your vault is empty.", reply_markup=back_kb(), parse_mode='HTML')
-    text = "🧾 <b><u>— YOUR RECENT ORDERS (LAST 10) —</u></b> 🧾\n\n"
-    for o in orders: text += f"📦 <b>{o[0]}</b> ({fmt_curr(o[3])})\n🔑 <code>{o[1]}</code>\n📅 <i>{o[2]}</i>\n━━━━━━━━━━━━━━━━\n"
-    await call.message.edit_text(text, reply_markup=back_kb(), parse_mode='HTML')
-
-@dp.callback_query(F.data == "menu_profile")
-async def show_profile(call: CallbackQuery):
-    u = db_query("SELECT user_id, first_name, account_type, balance, orders_count, spent, referrals_count, joined_date, is_reseller, reseller_since, total_saved, is_vip FROM users WHERE user_id=?", (call.from_user.id,), fetchone=True)
-    acc_type_display = []
-    if u[8]: acc_type_display.append(f"{get_emoji('reseller')} Reseller")
-    if u[11]: acc_type_display.append(f"{get_emoji('vip')} VIP")
-    type_str = " | ".join(acc_type_display) if acc_type_display else f"{get_emoji('regular_user')} Regular User"
-    text = (
-        f"{get_emoji('grid_id')} <b><u>— YOUR SECURE PROFILE —</u></b> {get_emoji('grid_id')}\n\n"
-        f"{get_emoji('grid_id')} <b>Grid ID:</b> <code>{u[0]}</code>\n"
-        f"{get_emoji('name')} <b>Name:</b> {u[1]}\n"
-        f"{get_emoji('account_level')} <b>Account Level:</b> {type_str}\n\n"
-        f"{get_emoji('wallet_left')} <b>— Wallet —</b> {get_emoji('wallet_right')}\n"
-        f"{get_emoji('wallet_left')} <b>Current Balance:</b> {fmt_curr(u[3])} {get_emoji('wallet_right')}\n\n"
-        f"{get_emoji('global_stats')} <b>— Global Statistics —</b>\n"
-        f"{get_emoji('total_orders')} <b>Total Orders:</b> {u[4]}\n"
-        f"{get_emoji('total_spent')} <b>Total Spent:</b> {fmt_curr(u[5])}\n"
-        f"{get_emoji('total_referrals')} <b>Total Referrals:</b> {u[6]}\n\n"
-    )
-    if u[8]:
-        text += f"{get_emoji('shield_icon')} <b>— RESELLER METRICS —</b> {get_emoji('shield_icon')}\n{get_emoji('money_icon')} <b>Total Saved via Reseller:</b> {fmt_curr(u[10])}\n\n"
-    text += f"{get_emoji('joined_grid')} <b>Joined Grid:</b> {u[7]}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="Redeem Promo Code",
-            callback_data="redeem_coupon",
-            icon_custom_emoji_id=get_emoji_icon('redeem_icon'),
-            style="success"
-        )],
-        [InlineKeyboardButton(text="BACK", callback_data="back_main", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data == "redeem_coupon")
-async def redeem_coupon_start(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("🎟 <b>Please enter your VIP / Promo redeem code below:</b>", reply_markup=back_kb("menu_profile"), parse_mode='HTML')
-    await state.set_state(UserStates.wait_for_redeem)
-
-@dp.message(UserStates.wait_for_redeem)
-async def process_redeem(m: Message, state: FSMContext):
-    code = m.text.strip().upper()
-    user_id = m.from_user.id
-    if db_query("SELECT * FROM redeemed WHERE user_id=? AND code=?", (user_id, code), fetchone=True):
-        await m.answer("❌ Anti-Fraud Alert: You already redeemed this unique code!", reply_markup=main_menu_kb(m.from_user.id), parse_mode='HTML')
-        await state.clear()
-        return
-    coupon = db_query("SELECT amount, uses_left FROM coupons WHERE code=?", (code,), fetchone=True)
-    if not coupon: await m.answer("❌ Invalid or Expired Code!", reply_markup=main_menu_kb(m.from_user.id), parse_mode='HTML')
-    elif coupon[1] <= 0: await m.answer("❌ This code's usage limit has been fully claimed by other users.", reply_markup=main_menu_kb(m.from_user.id), parse_mode='HTML')
-    else:
-        db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (coupon[0], user_id))
-        db_query("UPDATE coupons SET uses_left = uses_left - 1 WHERE code=?", (code,))
-        db_query("INSERT INTO redeemed (user_id, code) VALUES (?, ?)", (user_id, code))
-        log_activity(user_id, "PROMO_REDEEMED", f"Code: {code}, Amount: {coupon[0]}")
-        await m.answer(f"🎉 <b>Success!</b>\nSafely added {fmt_curr(coupon[0])} to your balance!", reply_markup=main_menu_kb(m.from_user.id), parse_mode='HTML')
-        try:
-            user_info = db_query("SELECT first_name FROM users WHERE user_id=?", (user_id,), fetchone=True)
-            uname = user_info[0] if user_info else "Unknown User"
-            await bot.send_message(ADMIN_ID, f"🎟 <b>PROMO CODE REDEEMED!</b>\n👤 User: {uname} (<code>{user_id}</code>)\n🔖 Code: <b>{code}</b>\n💵 Amount: {fmt_curr(coupon[0])}", parse_mode='HTML')
-        except Exception: pass
-    await state.clear()
-
-@dp.callback_query(F.data == "menu_referral")
-async def show_referral(call: CallbackQuery):
-    u = db_query("SELECT referrals_count, referral_earned FROM users WHERE user_id=?", (call.from_user.id,), fetchone=True)
-    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{call.from_user.id}"
-    text = (f"{get_emoji('referral')} <b><u>AFFILIATE PROGRAM</u></b> {get_emoji('referral')}\n\n✅ <b>Status:</b> ACTIVE\n💰 Earn <b>15% flat commission</b> on every successful purchase made by your referred friends!\n\n📊 <b>YOUR STATS:</b>\n👥 Total Invited: {u[0]}\n💵 Life-time Earned: {fmt_curr(u[1])}\n\n🔗 <b>Your Invite Link:</b>\n<code>{ref_link}</code>\n\n<i>Simply copy and share this link to start earning!</i>")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="BACK", callback_data="back_main", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-# ==============================================================================
-# 15. LUDO / DICE SPIN
-# ==============================================================================
-@dp.callback_query(F.data == "menu_spin_landing")
-async def lucky_spin_landing(call: CallbackQuery):
-    status_check = db_query("SELECT value FROM settings WHERE key='spin_status'", fetchone=True)
-    spin_status = status_check[0] if status_check else "ON"
-    if spin_status == "OFF": return await call.answer("⚠️ Lucky Ludo Spin is currently disabled by Admin.", show_alert=True)
-    await call.message.edit_text(f"{get_emoji('ludo_spin')} <b><u>— LUDO SPIN —</u></b> {get_emoji('ludo_spin')}\n\nTest your luck! You can spin once every 24 hours.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎲 Spin Dice Now!", callback_data="execute_spin", style="success")], 
-        [InlineKeyboardButton(text="BACK", callback_data="back_main", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ]), parse_mode='HTML')
-
-@dp.callback_query(F.data == "execute_spin")
-async def execute_spin(call: CallbackQuery):
-    status_check = db_query("SELECT value FROM settings WHERE key='spin_status'", fetchone=True)
-    if status_check and status_check[0] == "OFF": return await call.answer("⚠️ Lucky Spin is disabled.", show_alert=True)
-    u = db_query("SELECT last_spin, balance, is_vip FROM users WHERE user_id=?", (call.from_user.id,), fetchone=True)
-    now = datetime.now()
-    if u[0] and now < datetime.strptime(u[0], "%Y-%m-%d %H:%M:%S") + timedelta(hours=24):
-        return await call.message.edit_text("❌ <b>Cooldown Active!</b>\nYou already played today. Come back tomorrow.", reply_markup=back_kb(), parse_mode='HTML')
-    await call.message.delete()
-    dice_msg = await bot.send_dice(chat_id=call.message.chat.id, emoji="🎲")
-    await asyncio.sleep(SPIN_DELAY_SECONDS) 
-    dice_val = dice_msg.dice.value
-    limit_check = db_query("SELECT value FROM settings WHERE key='daily_spin_limit'", fetchone=True)
-    limit = safe_float(limit_check[0]) if limit_check else 50.0
-    rewards_db = db_query("SELECT amount FROM spin_rewards WHERE amount <= ?", (limit,), fetchall=True)
-    rewards_list = [r[0] for r in rewards_db] if rewards_db else [0.0]
-    reward = random.choice(rewards_list)
-    if bool(u[2]) and reward > 0: reward = reward * 2.0
-    new_bal = u[1] + reward
-    db_query("UPDATE users SET balance=?, last_spin=? WHERE user_id=?", (new_bal, now.strftime("%Y-%m-%d %H:%M:%S"), call.from_user.id))
-    log_activity(call.from_user.id, "PLAYED_SPIN", f"Reward: {reward}, Dice: {dice_val}")
-    msg = get_ui_text("lucky_dice_result", dice_value=dice_val, won_amount=fmt_curr(reward), new_balance=fmt_curr(new_bal))
-    if bool(u[2]) and reward > 0: msg += "\n\n<i>🌟 VIP Bonus: 2x Multiplier Applied!</i>"
-    await dice_msg.reply(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📚 BACK TO MENU", callback_data="back_main", style="success")]]), parse_mode='HTML')
-
-# ==============================================================================
-# 16. TUTORIALS & SUPPORT
-# ==============================================================================
-@dp.callback_query(F.data == "menu_how_to")
-async def tutorial_system(call: CallbackQuery):
-    video_link_query = db_query("SELECT value FROM settings WHERE key='how_to_video'", fetchone=True)
-    video_link = video_link_query[0] if video_link_query and video_link_query[0] != 'None' else None
-    text = (f"{get_emoji('tutorial')} <b><u>— TUTORIALS & GUIDE —</u></b> {get_emoji('tutorial')}\n\n1️⃣ Add funds via <b>Add Balance</b>\n2️⃣ Navigate to <b>Product Store</b>\n3️⃣ Choose your desired Panel and Package validity.\n4️⃣ The Key and Installation APK link will be instantly provided.")
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    if video_link: kb.inline_keyboard.append([InlineKeyboardButton(text="Watch Full Video Tutorial", url=video_link, icon_custom_emoji_id=get_emoji_icon("tutorial"), style="success")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="BACK", callback_data="back_main", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data == "menu_support")
-async def support_center(call: CallbackQuery):
-    telegram_link = get_setting("support_telegram", "https://t.me/YourSupport")
-    whatsapp_link = get_setting("support_whatsapp", "https://wa.me/YourNumber")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Contact on Telegram", url=telegram_link, icon_custom_emoji_id=get_emoji_icon("telegram"), style="primary")],
-        [InlineKeyboardButton(text="Contact on WhatsApp", url=whatsapp_link, icon_custom_emoji_id=get_emoji_icon("whatsapp"), style="primary")],
-        [InlineKeyboardButton(text="🎫 Open New Ticket", callback_data="open_ticket", style="success"), InlineKeyboardButton(text="📋 My Open Tickets", callback_data="my_tickets", style="success")], 
-        [InlineKeyboardButton(text="BACK", callback_data="back_main", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    await call.message.edit_text(f"{get_emoji('telegram')}{get_emoji('whatsapp')} <b><u>— PREMIUM SUPPORT CENTER —</u></b>\n\nContact us via Telegram or WhatsApp for instant help, or open a support ticket for admin assistance.", reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data == "my_tickets")
-async def view_my_tickets(call: CallbackQuery):
-    tickets = db_query("SELECT id, message, status, created_at FROM tickets WHERE user_id=? ORDER BY id DESC LIMIT 5", (call.from_user.id,), fetchall=True)
-    if not tickets: return await call.message.edit_text("📋 You do not have any active or previous support tickets.", reply_markup=back_kb("menu_support"), parse_mode='HTML')
-    text = "📋 <b><u>— Your Recent Tickets —</u></b> 📋\n\n"
-    for t in tickets:
-        status_icon = "🟢" if t[2] == 'Open' else "🔴"
-        text += f"🎫 <b>Ticket #{t[0]}</b> | Status: {status_icon} <b>{t[2]}</b>\n📅 <i>{t[3]}</i>\n📝 <i>{t[1][:80]}...</i>\n\n"
-    await call.message.edit_text(text, reply_markup=back_kb("menu_support"), parse_mode='HTML')
-
-@dp.callback_query(F.data == "open_ticket")
-async def open_ticket_start(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("📝 <b>Please type your issue/message below in detail:</b>", reply_markup=back_kb("menu_support"), parse_mode='HTML')
-    await state.set_state(UserStates.wait_for_ticket)
-
-@dp.message(UserStates.wait_for_ticket)
-async def process_ticket(m: Message, state: FSMContext):
-    db_query("INSERT INTO tickets (user_id, message, created_at) VALUES (?, ?, ?)", (m.from_user.id, m.text, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    await m.answer("✅ <b>Ticket Submitted Successfully!</b> Admins will reply soon.", reply_markup=main_menu_kb(m.from_user.id), parse_mode='HTML')
-    try: await bot.send_message(ADMIN_ID, f"🚨 <b>NEW SUPPORT TICKET</b>\nFrom: <code>{m.from_user.id}</code>\nMsg: {m.text}", parse_mode='HTML')
-    except: pass
-    log_activity(m.from_user.id, "OPENED_TICKET")
-    await state.clear()
-
-# ==============================================================================
-# 17. ADMIN PANEL
-# ==============================================================================
-@dp.message(Command("admin"))
-async def admin_panel(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
-    await state.clear()
-    await message.answer("⚙️ <b>Advanced Admin Terminal</b>\n<i>Authorized Access Granted.</i>", reply_markup=admin_kb(), parse_mode='HTML')
-
-@dp.callback_query(F.data == "admin_panel_back")
-async def back_to_admin(call: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await call.message.edit_text("⚙️ <b>Advanced Admin Terminal</b>\n<i>Authorized Access Granted.</i>", reply_markup=admin_kb(), parse_mode='HTML')
-
-@dp.callback_query(F.data == "admin_toggle_vip_sys")
-async def toggle_vip_sys(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    res = db_query("SELECT value FROM settings WHERE key='vip_status'", fetchone=True)
-    current = res[0] if res else 'OFF'
-    new_status = 'ON' if current == 'OFF' else 'OFF'
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES ('vip_status', ?)", (new_status,))
-    await call.message.edit_reply_markup(reply_markup=admin_kb())
-
-@dp.callback_query(F.data == "admin_user_control_start")
-async def admin_user_control_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Download Full User List", callback_data="admin_download_userlist", style="success")],
-        [InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    await call.message.edit_text("💻 <b>User Control Terminal</b>\n\n✏️ Enter the <b>User ID</b> or <b>@Username</b> you want to investigate or manage:\n\n👇 <b>OR</b> download the full user CSV format list:", reply_markup=kb, parse_mode='HTML')
-    await state.set_state(AdminStates.manage_target_user)
-
-@dp.callback_query(F.data == "admin_download_userlist")
-async def admin_download_userlist(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    users = db_query("SELECT username, user_id, phone, balance, orders_count, is_vip, is_reseller FROM users", fetchall=True)
-    if not users: return await call.answer("❌ No users found in the database.", show_alert=True)
-    file_content = "FULL DATABASE DUMP\n" + "="*100 + "\n"
-    for u in users:
-        uname = u[0] if u[0] else "No_Username"
-        uid = u[1]
-        phone = u[2] if u[2] else "No_Phone"
-        bal = u[3]
-        orders = u[4]
-        vip_status = "YES" if u[5] else "NO"
-        res_status = "YES" if u[6] else "NO"
-        file_content += f"UID: {uid} | UNAME: {uname} | PHONE: {phone} | BAL: ₹{bal:.2f} | BUY: {orders} | VIP: {vip_status} | RES: {res_status}\n"
-    doc = BufferedInputFile(file_content.encode('utf-8'), filename=f"DB_{datetime.now().strftime('%Y%m%d')}.txt")
-    await call.message.answer_document(document=doc, caption="📋 <b>Database export complete.</b>", parse_mode='HTML')
-    await call.answer()
-
-@dp.message(AdminStates.manage_target_user)
-async def process_user_lookup(m: Message, state: FSMContext):
-    target = m.text.strip()
-    if target.startswith('@'): target = target[1:]
-    loader_msg = await hacker_loading(m, "Querying User Database")
-    user_q = db_query("SELECT user_id, first_name, username, balance, is_reseller, orders_count, spent, joined_date, is_banned, warnings, is_vip FROM users WHERE user_id=? OR username=? COLLATE NOCASE", (target, target), fetchone=True)
-    if not user_q: return await loader_msg.edit_text("❌ Target not found in the grid. Check ID/Username syntax.", reply_markup=admin_back_kb(), parse_mode='HTML')
-    u_id, u_name, u_user, bal, is_res, orders, spent, joined, is_banned, warnings, is_vip = user_q
-    await state.update_data(target_u_id=u_id)
-    status_emoji = "🔴 BANNED" if is_banned else "🟢 ACTIVE"
-    tags = []
-    if is_res: tags.append("👑 Reseller")
-    if is_vip: tags.append("🌟 VIP")
-    type_str = " | ".join(tags) if tags else "👤 Regular"
-    text = (f"🛡 <b><u>USER CONTROL TERMINAL</u></b> 🛡\n━━━━━━━━━━━━━━━━━━\n📛 <b>Name:</b> {u_name} (@{u_user})\n🆔 <b>ID:</b> <code>{u_id}</code>\n📊 <b>Status:</b> {status_emoji}\n🔰 <b>Type:</b> {type_str}\n⚠️ <b>Warnings Issued:</b> {warnings}\n━━━━━━━━━━━━━━━━━━\n💰 <b>Wallet Balance:</b> {fmt_curr(bal)}\n📦 <b>Orders:</b> {orders} | 💸 <b>Total Spent:</b> {fmt_curr(spent)}\n📅 <b>Joined:</b> {joined}")
-    ban_btn_text = "Unban ✅" if is_banned else "Ban 🚫"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Add Funds ➕", callback_data=f"usrctrl_add_{u_id}", style="success"), InlineKeyboardButton(text="Minus Funds ➖", callback_data=f"usrctrl_min_{u_id}", style="danger")],
-        [InlineKeyboardButton(text=ban_btn_text, callback_data=f"usrctrl_ban_{u_id}", style="danger"), InlineKeyboardButton(text="Warn User ⚠️", callback_data=f"usrctrl_warn_{u_id}", style="danger")],
-        [InlineKeyboardButton(text="Give VIP 🌟" if not is_vip else "Remove VIP 🚫", callback_data=f"usrctrl_vip_{u_id}", style="success")],
-        [InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    await loader_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("usrctrl_"))
-async def handle_user_actions(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    action = call.data.split("_")[1]
-    u_id = int(call.data.split("_")[2])
-    await state.update_data(target_u_id=u_id)
-    if action == "ban":
-        current_status = db_query("SELECT is_banned FROM users WHERE user_id=?", (u_id,), fetchone=True)[0]
-        if current_status == 0:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Yes, Ban", callback_data=f"confirm_ban_{u_id}", style="danger"), InlineKeyboardButton(text="❌ Cancel", callback_data="admin_user_control_start", style="danger")]
-            ])
-            await call.message.edit_text(f"⚠️ Are you sure you want to <b>BAN</b> user <code>{u_id}</code>?", reply_markup=kb, parse_mode='HTML')
-            await state.set_state(AdminStates.confirm_ban)
-        else:
-            db_query("UPDATE users SET is_banned=0 WHERE user_id=?", (u_id,))
-            await call.answer("✅ User unbanned successfully!", show_alert=True)
-            m = call.message; m.text = str(u_id); await process_user_lookup(m, state)
-    elif action == "vip":
-        current_status = db_query("SELECT is_vip FROM users WHERE user_id=?", (u_id,), fetchone=True)[0]
-        if current_status == 1:
-            db_query("UPDATE users SET is_vip=0 WHERE user_id=?", (u_id,))
-            await call.answer("✅ VIP Removed!", show_alert=True)
-        else:
-            db_query("UPDATE users SET is_vip=1, vip_since=? WHERE user_id=?", (datetime.now().strftime("%Y-%m-%d"), u_id))
-            await call.answer("✅ VIP Granted!", show_alert=True)
-        m = call.message; m.text = str(u_id); await process_user_lookup(m, state)
-    elif action == "add":
-        await call.message.edit_text("💰 Enter the amount to <b>ADD</b> to this user's wallet:", reply_markup=admin_back_kb(), parse_mode='HTML')
-        await state.set_state(AdminStates.wait_for_add_money)
-    elif action == "min":
-        await call.message.edit_text("💸 Enter the amount to <b>DEDUCT</b> from this user's wallet:", reply_markup=admin_back_kb(), parse_mode='HTML')
-        await state.set_state(AdminStates.wait_for_minus_money)
-    elif action == "warn":
-        await call.message.edit_text("⚠️ Type the strict warning message you want to send directly to this user:", reply_markup=admin_back_kb(), parse_mode='HTML')
-        await state.set_state(AdminStates.wait_for_warning)
-
-@dp.callback_query(F.data.startswith("confirm_ban_"))
-async def confirm_ban(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    u_id = int(call.data.split("_")[2])
-    db_query("UPDATE users SET is_banned=1 WHERE user_id=?", (u_id,))
-    await call.answer("🔴 User has been banned!", show_alert=True)
-    await state.clear()
-    m = call.message; m.text = str(u_id); await process_user_lookup(m, state)
-
-@dp.message(AdminStates.wait_for_add_money)
-async def exec_add_money(m: Message, state: FSMContext):
-    try:
-        amt = float(m.text)
-        data = await state.get_data()
-        u_id = data['target_u_id']
-        db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (amt, u_id))
-        await m.answer(f"✅ Successfully added {fmt_curr(amt)} to target <code>{u_id}</code>.", reply_markup=admin_kb(), parse_mode='HTML')
-        try: await bot.send_message(u_id, f"💰 <b>Wallet Top-up!</b>\nAdmin has manually added {fmt_curr(amt)} to your wallet.", parse_mode='HTML')
-        except: pass
-        await state.clear()
-    except ValueError: await m.answer("❌ Critical Error: Input must be a valid number.")
-
-@dp.message(AdminStates.wait_for_minus_money)
-async def exec_minus_money(m: Message, state: FSMContext):
-    try:
-        amt = float(m.text)
-        data = await state.get_data()
-        u_id = data['target_u_id']
-        db_query("UPDATE users SET balance = balance - ? WHERE user_id=?", (amt, u_id))
-        await m.answer(f"✅ Successfully deducted {fmt_curr(amt)} from target <code>{u_id}</code>.", reply_markup=admin_kb(), parse_mode='HTML')
-        await state.clear()
-    except ValueError: await m.answer("❌ Critical Error: Input must be a valid number.")
-
-@dp.message(AdminStates.wait_for_warning)
-async def exec_warn_user(m: Message, state: FSMContext):
-    data = await state.get_data()
-    u_id = data['target_u_id']
-    warn_text = m.text
-    db_query("UPDATE users SET warnings = warnings + 1 WHERE user_id=?", (u_id,))
-    await m.answer(f"✅ Official warning dispatched to <code>{u_id}</code>.", reply_markup=admin_kb(), parse_mode='HTML')
-    try: await bot.send_message(u_id, f"⚠️ <b>OFFICIAL WARNING FROM SYSTEM ADMIN:</b>\n\n{warn_text}\n\n<i>Subsequent infractions may lead to an automated grid ban.</i>", parse_mode='HTML')
-    except: pass
-    await state.clear()
-
-# ==============================================================================
-# 18. ADMIN STATISTICS
-# ==============================================================================
-@dp.callback_query(F.data == "admin_view_stats")
-async def admin_dashboard_stats(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    t_users = db_query("SELECT COUNT(*) FROM users", fetchone=True)[0]
-    t_resellers = db_query("SELECT COUNT(*) FROM users WHERE is_reseller=1", fetchone=True)[0]
-    t_vip = db_query("SELECT COUNT(*) FROM users WHERE is_vip=1", fetchone=True)[0]
-    t_prods = db_query("SELECT COUNT(*) FROM products", fetchone=True)[0]
-    t_keys = db_query("SELECT COUNT(*) FROM product_keys WHERE is_used=0", fetchone=True)[0]
-    t_rev = db_query("SELECT SUM(spent) FROM users", fetchone=True)[0] or 0.0
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    t_spins = db_query("SELECT COUNT(*) FROM users WHERE last_spin LIKE ?", (f"{today_str}%",), fetchone=True)[0]
-    msg = (f"📊 <b><u>GRID INTELLIGENCE DASHBOARD</u></b> 📊\n━━━━━━━━━━━━━━━━━━\n👥 <b>Total Grid Users:</b> {t_users}\n👑 <b>Wholesale Resellers:</b> {t_resellers}\n🌟 <b>Elite VIP Members:</b> {t_vip}\n━━━━━━━━━━━━━━━━━━\n📦 <b>Active Products:</b> {t_prods}\n🔑 <b>Unused Keys in Vault:</b> {t_keys}\n💰 <b>Total Gross Revenue:</b> {fmt_curr(t_rev)}\n🎰 <b>Ludo Spins Today:</b> {t_spins}\n━━━━━━━━━━━━━━━━━━")
-    await call.message.edit_text(msg, reply_markup=admin_back_kb(), parse_mode='HTML')
-
-# ==============================================================================
-# 19. ADMIN PRODUCT MANAGEMENT
-# ==============================================================================
-@dp.callback_query(F.data == "admin_add_prod")
-async def add_prod_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for cat in FIXED_CATEGORIES:
-        emoji_id = get_category_emoji(cat)
-        kb.inline_keyboard.append([InlineKeyboardButton(text=cat, callback_data=f"addprod_cat_{cat}", icon_custom_emoji_id=emoji_id, style="primary")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="Cancel", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text("<b>Step 1:</b> Choose the <b>Category</b> for this product:", reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("addprod_cat_"))
-async def add_prod_category_selected(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    category = call.data.split("addprod_cat_", 1)[1]
-    await state.update_data(cat=category)
-    await call.message.edit_text(f"<b>Step 2:</b> Enter <b>PANEL NAME</b>\n(e.g., 'MST PANEL', 'DRIP PANEL'):", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.add_prod_panel_name)
-
-@dp.message(AdminStates.add_prod_panel_name)
-async def add_prod_panel_name(m: Message, state: FSMContext):
-    await state.update_data(panel_name=m.text)
-    await m.answer("<b>Step 3:</b> Enter <b>PACKAGE DURATION/DATE NAME</b>\n(e.g., '7 Days', '1 Month'):", parse_mode='HTML')
-    await state.set_state(AdminStates.add_prod_name)
-
-@dp.message(AdminStates.add_prod_name)
-async def add_prod_name(m: Message, state: FSMContext):
-    await state.update_data(name=m.text)
-    await m.answer("⏳ Enter Time Validity String (e.g., '24 Hours'):", parse_mode='HTML')
-    await state.set_state(AdminStates.add_prod_validity)
-
-@dp.message(AdminStates.add_prod_validity)
-async def add_prod_validity(m: Message, state: FSMContext):
-    await state.update_data(validity=m.text)
-    await m.answer("📱 Enter strict Device Enforcement Limit (e.g., '1 Device HWID'):", parse_mode='HTML')
-    await state.set_state(AdminStates.add_prod_device_limit)
-
-@dp.message(AdminStates.add_prod_device_limit)
-async def add_prod_device_limit(m: Message, state: FSMContext):
-    await state.update_data(device_limit=m.text)
-    await m.answer("💰 Enter standard **User Price** in Rupees (₹) (e.g., 500):", parse_mode='HTML')
-    await state.set_state(AdminStates.add_prod_price)
-
-@dp.message(AdminStates.add_prod_price)
-async def add_prod_price(m: Message, state: FSMContext):
-    try:
-        await state.update_data(price=float(m.text))
-        await m.answer("👑 Enter wholesale **Reseller Price** in Rupees (₹) (e.g., 300):", parse_mode='HTML')
-        await state.set_state(AdminStates.add_prod_reseller_price)
-    except ValueError: await m.answer("❌ Invalid input datatype! Must be numerical.")
-
-@dp.message(AdminStates.add_prod_reseller_price)
-async def add_prod_reseller_price(m: Message, state: FSMContext):
-    try:
-        await state.update_data(reseller_price=float(m.text))
-        await m.answer("🔗 Enter direct APK/Payload Download Link (or type 'none' to omit):", parse_mode='HTML')
-        await state.set_state(AdminStates.add_prod_apk)
-    except ValueError: await m.answer("❌ Invalid input datatype! Must be numerical.")
-
-@dp.message(AdminStates.add_prod_apk)
-async def add_prod_apk(m: Message, state: FSMContext):
-    await state.update_data(apk="" if m.text.lower() == 'none' else m.text)
-    await m.answer("📥 <b>Vault Injection Phase</b>\n\nPaste all the license <b>Keys</b> exactly as formatted (1 key per newline):", parse_mode='HTML')
-    await state.set_state(AdminStates.add_prod_keys)
-
-@dp.message(AdminStates.add_prod_keys)
-async def add_prod_keys(m: Message, state: FSMContext):
-    keys = [k.strip() for k in m.text.strip().split('\n') if k.strip()]
-    data = await state.get_data()
-    stock = len(keys)
-    conn = sqlite3.connect('Cuibcc.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO products (category, panel_name, name, price_inr, reseller_price, stock, apk_link, validity, device_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (data['cat'], data['panel_name'], data['name'], data['price'], data['reseller_price'], stock, data['apk'], data['validity'], data['device_limit']))
-    prod_id = c.lastrowid
-    for k in keys: c.execute("INSERT INTO product_keys (product_id, key_text) VALUES (?, ?)", (prod_id, k))
-    conn.commit()
-    conn.close()
-    await m.answer(f"✅ <b>Data Deployment Successful!</b>\n\n📦 Panel '{data['cat']}' -> Panel Name '{data['panel_name']}' -> Package '{data['name']}'\n🔒 Vault Stock: {stock} Keys injected.\n💰 User Price: {fmt_curr(data['price'])} | 👑 Reseller: {fmt_curr(data['reseller_price'])}", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_manage_prods")
-async def admin_manage_prods(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    prods = db_query("SELECT id, name, category, panel_name, stock, is_active FROM products ORDER BY category, panel_name", fetchall=True)
-    if not prods: return await call.message.edit_text("📦 Store Database is completely empty.", reply_markup=admin_back_kb(), parse_mode='HTML')
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for p in prods:
-        status_dot = "🟢" if p[5] else "🔴"
-        panel_name = p[3] if p[3] is not None else ""
-        kb.inline_keyboard.append([InlineKeyboardButton(text=f"{status_dot} [{p[2]}] {panel_name} - {p[1]} (Stock: {p[4]})", callback_data=f"admin_view_p_{p[0]}", style="primary")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text("📦 <b>Database Editor: Select Node to modify</b>", reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("admin_view_p_"))
-async def admin_view_product(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    try:
-        p_id = int(call.data.split("_")[3])
-        prod = db_query("SELECT * FROM products WHERE id=?", (p_id,), fetchone=True)
-        if not prod: return await call.answer("❌ Architecture fault: Node lost!", show_alert=True)
-        panel_name = prod[2] if prod[2] is not None else ""
-        price_inr = safe_float(prod[4])
-        reseller_price = safe_float(prod[5])
-        text = (f"📦 <b><u>NODE DEEP DIVE DETAILS</u></b>\n━━━━━━━━━━━━━━━━━━\n<b>ID:</b> <code>{prod[0]}</code>\n<b>Panel Group:</b> {prod[1]}\n<b>Panel Name:</b> {panel_name}\n<b>Package Date/Time:</b> {prod[3]}\n<b>Standard Price:</b> {fmt_curr(price_inr)}\n👑 <b>Wholesale Price:</b> {fmt_curr(reseller_price)}\n<b>Vault Stock:</b> {prod[6]}\n<b>Payload Link:</b> {prod[7] if prod[7] else 'None'}\n<b>Time Config:</b> {prod[8]}\n<b>HWID Limit:</b> {prod[9]}\n<b>Visibility:</b> {'Active' if prod[10] else 'Hidden'}\n━━━━━━━━━━━━━━━━━━")
-        toggle_btn_text = "Hide Product 👁‍🗨" if prod[10] else "Unhide Product 👁"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Edit Panel Group 🏷️", callback_data=f"edit_p_{p_id}_cat", style="primary"), InlineKeyboardButton(text="Edit Panel Name 🏷️", callback_data=f"edit_p_{p_id}_panel_name", style="primary")],
-            [InlineKeyboardButton(text="Edit Package Name ✏️", callback_data=f"edit_p_{p_id}_name", style="primary")],
-            [InlineKeyboardButton(text="Edit Price 💰", callback_data=f"edit_p_{p_id}_price", style="primary"), InlineKeyboardButton(text="Edit R-Price 👑", callback_data=f"edit_p_{p_id}_rprice", style="primary")],
-            [InlineKeyboardButton(text="Edit Validity ⏳", callback_data=f"edit_p_{p_id}_validity", style="primary"), InlineKeyboardButton(text="Edit Device 📱", callback_data=f"edit_p_{p_id}_device", style="primary")],
-            [InlineKeyboardButton(text="Edit APK Link 🔗", callback_data=f"edit_p_{p_id}_apk", style="primary"), InlineKeyboardButton(text="Add Keys ➕", callback_data=f"edit_p_{p_id}_keys", style="success")],
-            [InlineKeyboardButton(text="Delete Key 🗑", callback_data=f"delkey_p_{p_id}", style="danger"), InlineKeyboardButton(text=toggle_btn_text, callback_data=f"toggle_p_{p_id}", style="primary")],
-            [InlineKeyboardButton(text="Nuke Full Node 🗑", callback_data=f"delete_p_{p_id}", style="danger"), InlineKeyboardButton(text="BACK", callback_data="admin_manage_prods", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-        ])
-        await call.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True, parse_mode='HTML')
+        proc = subprocess.Popen(
+            [python_exe, main_path_abs],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=server_dir,
+            text=True, encoding='utf-8', errors='replace',
+            bufsize=1, env=env, universal_newlines=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        )
+        
+        log(f"[{ts()}] Server marked as running")
+        log(f"[{ts()}] PID: {proc.pid}")
+        log("")
+        
+        def rate_monitor():
+            while proc.poll() is None:
+                time.sleep(5)
+                exceeded, avg_cpu = rate_limiter.check_rate(server_id, cpu_limit)
+                if exceeded:
+                    log(f"[{datetime.now().strftime('%I:%M:%S %p')}] CPU Limit! {avg_cpu:.1f}% > {cpu_limit}%")
+                    proc.terminate()
+                    time.sleep(2)
+                    if proc.poll() is None: proc.kill()
+                    
+                    users = load_users()
+                    for uname, data in users.items():
+                        if uname == 'admin': continue
+                        servers = data.get('servers', [])
+                        if not isinstance(servers, list): continue
+                        for s in servers:
+                            if isinstance(s, dict) and s.get('server_id') == server_id:
+                                s['status'] = 'stopped'
+                                s['pid'] = None
+                                s['rate_limit_exceeded'] = True
+                                s['stopped_by_user'] = False
+                                save_users(users)
+                                break
+                    break
+        
+        threading.Thread(target=rate_monitor, daemon=True).start()
+        
+        def stream_output():
+            try:
+                with open(log_file, 'a', encoding='utf-8') as f:
+                    for line in iter(proc.stdout.readline, ''):
+                        if line:
+                            line = line.rstrip('\n\r')
+                            if line:
+                                f.write(f"[{datetime.now().strftime('%I:%M:%S %p')}] {line}\n")
+                                f.flush()
+            except: pass
+        
+        threading.Thread(target=stream_output, daemon=True).start()
+        
+        return proc.pid, None
+        
     except Exception as e:
-        logger.error(f"Error in admin_view_product: {e}")
-        await call.message.edit_text(f"❌ Error loading product: {str(e)}", reply_markup=admin_back_kb(), parse_mode='HTML')
+        log(f"[{ts()}] Error: {str(e)}")
+        return None, str(e)
 
-@dp.callback_query(F.data.startswith("toggle_p_"))
-async def admin_toggle_product(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    p_id = int(call.data.split("_")[2])
-    current = db_query("SELECT is_active FROM products WHERE id=?", (p_id,), fetchone=True)[0]
-    new_val = 0 if current == 1 else 1
-    db_query("UPDATE products SET is_active=? WHERE id=?", (new_val, p_id))
-    await call.answer("Visibility updated successfully!", show_alert=True)
-    await admin_view_product(call)
+def stop_bot_process(pid):
+    try:
+        if sys.platform == 'win32':
+            subprocess.run(['taskkill', '/F', '/PID', str(pid)], capture_output=True)
+        else:
+            os.kill(pid, 15)
+        return True
+    except: return False
 
-# ==============================================================================
-# FIX: Edit product field – correctly handle different data types and multi-word fields
-# ==============================================================================
-@dp.callback_query(F.data.startswith("edit_p_"))
-async def start_edit_product(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    # Use split with maxsplit=3 to keep field name intact (may contain underscores)
-    parts = call.data.split("_", 3)
-    if len(parts) < 4:
-        return await call.answer("Invalid callback data.", show_alert=True)
-    p_id = int(parts[2])
-    field = parts[3]
-    await state.update_data(edit_p_id=p_id, edit_field=field)
-    if field == 'keys':
-        await call.message.edit_text("📥 <b>Vault Injection</b>\nPaste the <b>NEW KEYS</b> to append to the stock (1 key per line):", reply_markup=admin_back_kb(), parse_mode='HTML')
-        await state.set_state(AdminStates.wait_for_add_keys)
-    else:
-        field_name_map = {'cat': 'New Panel Group/Category Name', 'panel_name': 'New Panel Name', 'name': 'New Package/Date Name', 'price': 'New Standard Price in ₹', 'rprice': 'New Reseller Price in ₹', 'validity': 'New Time Validity String', 'device': 'New HWID Limit String', 'apk': 'New Payload Link (or type "none")'}
-        await call.message.edit_text(f"✏️ Input the required data for: <b>{field_name_map.get(field, field)}</b>", reply_markup=admin_back_kb(), parse_mode='HTML')
-        await state.set_state(AdminStates.wait_for_new_value)
-
-@dp.message(AdminStates.wait_for_new_value)
-async def process_edit_value(m: Message, state: FSMContext):
-    data = await state.get_data()
-    p_id = data['edit_p_id']; field = data['edit_field']; new_val = m.text.strip()
-    
-    # Convert price fields to float, others remain strings
-    if field in ['price', 'rprice']:
+def monitor_bot(server_id, pid):
+    while True:
         try:
-            new_val = float(new_val)
-        except ValueError:
-            return await m.answer("❌ Invalid number format. Please enter a valid price (e.g., 500).")
-    elif field == 'apk':
-        new_val = "" if new_val.lower() == 'none' else new_val
-    # For panel_name, cat, name, validity, device – keep as string
+            if sys.platform == 'win32':
+                result = subprocess.run(['tasklist', '/FI', f'PID eq {pid}'], capture_output=True, text=True)
+                if str(pid) not in result.stdout:
+                    break
+            else:
+                try: os.kill(pid, 0)
+                except: break
+        except: break
+        time.sleep(5)
     
-    db_col_map = {'cat': 'category', 'panel_name': 'panel_name', 'name': 'name', 'price': 'price_inr', 'rprice': 'reseller_price', 'validity': 'validity', 'device': 'device_limit', 'apk': 'apk_link'}
-    db_query(f"UPDATE products SET {db_col_map[field]}=? WHERE id=?", (new_val, p_id))
-    await m.answer("✅ <b>Node updated gracefully!</b>", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
+    server, _ = get_server_by_id(server_id)
+    if not server: return
+    if server.get('stopped_by_user'): return
+    if server.get('rate_limit_exceeded'): return
+    
+    if should_auto_restart(server_id):
+        time.sleep(3)
+        new_pid, error = run_bot(server_id, server.get('main_file', 'main.py'), 
+                                 server.get('requirements_file', 'requirements.txt'))
+        if new_pid:
+            users = load_users()
+            for uname, data in users.items():
+                if uname == 'admin': continue
+                servers = data.get('servers', [])
+                if not isinstance(servers, list): continue
+                for s in servers:
+                    if isinstance(s, dict) and s.get('server_id') == server_id:
+                        s['status'] = 'running'
+                        s['pid'] = new_pid
+                        s['started_at'] = str(datetime.now())
+                        s['rate_limit_exceeded'] = False
+                        s['stopped_by_user'] = False
+                        save_users(users)
+                        break
+            threading.Thread(target=monitor_bot, args=(server_id, new_pid), daemon=True).start()
+    else:
+        users = load_users()
+        for uname, data in users.items():
+            if uname == 'admin': continue
+            servers = data.get('servers', [])
+            if not isinstance(servers, list): continue
+            for s in servers:
+                if isinstance(s, dict) and s.get('server_id') == server_id:
+                    s['status'] = 'stopped'
+                    s['pid'] = None
+                    save_users(users)
+                    return
 
-@dp.message(AdminStates.wait_for_add_keys)
-async def process_add_keys(m: Message, state: FSMContext):
-    data = await state.get_data()
-    p_id = data['edit_p_id']
-    keys = [k.strip() for k in m.text.strip().split('\n') if k.strip()]
-    if len(keys) == 0: return await m.answer("❌ Protocol breach: Zero valid keys found.", reply_markup=admin_kb(), parse_mode='HTML')
-    conn = sqlite3.connect('Cuibcc.db')
-    c = conn.cursor()
-    for k in keys: c.execute("INSERT INTO product_keys (product_id, key_text) VALUES (?, ?)", (p_id, k))
-    c.execute("UPDATE products SET stock = stock + ? WHERE id=?", (len(keys), p_id))
-    conn.commit(); conn.close()
-    await m.answer(f"✅ <b>Vault Secure!</b> {len(keys)} new keys appended and encrypted.", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
-
-@dp.callback_query(F.data.startswith("delete_p_"))
-async def admin_delete_product(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    p_id = int(call.data.split("_")[2])
-    db_query("DELETE FROM products WHERE id=?", (p_id,))
-    db_query("DELETE FROM product_keys WHERE product_id=?", (p_id,))
-    await call.answer("☢️ Nuclear wipe successful! Node and vault deleted.", show_alert=True)
-    await admin_manage_prods(call)
-
-@dp.callback_query(F.data.startswith("delkey_p_"))
-async def admin_delete_key_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    p_id = int(call.data.split("_")[2])
-    await state.update_data(del_p_id=p_id)
-    await call.message.edit_text("🗑 Send the <b>exact string match</b> of the key you wish to purge from the vault:", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_delete_key)
-
-@dp.message(AdminStates.wait_for_delete_key)
-async def process_delete_key(m: Message, state: FSMContext):
-    data = await state.get_data()
-    p_id = data['del_p_id']
-    key_to_delete = m.text.strip()
-    key_data = db_query("SELECT id, is_used FROM product_keys WHERE product_id=? AND key_text=?", (p_id, key_to_delete), fetchone=True)
-    if not key_data: return await m.answer("❌ Key not found. Check logs and try again.", reply_markup=admin_back_kb(), parse_mode='HTML')
-    if key_data[1] == 1: return await m.answer("⚠️ Action Blocked: This key has already been dispatched to a user.", reply_markup=admin_back_kb(), parse_mode='HTML')
-    db_query("DELETE FROM product_keys WHERE id=?", (key_data[0],))
-    db_query("UPDATE products SET stock = stock - 1 WHERE id=?", (p_id,))
-    await m.answer(f"✅ Key <code>{key_to_delete}</code> securely purged from vault.\n📦 Database indices updated.", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
-
-# ==============================================================================
-# 20. ADMIN TICKETS, BROADCAST, COUPONS
-# ==============================================================================
-@dp.callback_query(F.data == "admin_view_tickets")
-async def admin_view_tickets(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    tickets = db_query("SELECT id, user_id, message, created_at FROM tickets WHERE status='Open' LIMIT 1", fetchall=True)
-    if not tickets: return await call.answer("✅ Zero pending issues. Grid is clean!", show_alert=True)
-    t = tickets[0]
-    text = (f"🎫 <b><u>ACTIVE TICKET #{t[0]}</u></b>\n👤 <b>Origin UID:</b> <code>{t[1]}</code>\n📅 <b>Timestamp:</b> {t[3]}\n\n📝 <b>Payload:</b>\n{t[2]}")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Formulate Reply", callback_data=f"reply_ticket_{t[0]}_{t[1]}", style="primary")],
-        [InlineKeyboardButton(text="❌ Force Close Ticket", callback_data=f"close_ticket_{t[0]}", style="danger")],
-        [InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("close_ticket_"))
-async def close_ticket(call: CallbackQuery):
-    ticket_id = call.data.split("_")[2]
-    db_query("UPDATE tickets SET status='Closed' WHERE id=?", (ticket_id,))
-    await call.answer("✅ Status set to Closed.", show_alert=True)
-    await admin_view_tickets(call) 
-
-@dp.callback_query(F.data.startswith("reply_ticket_"))
-async def reply_ticket_start(call: CallbackQuery, state: FSMContext):
-    data = call.data.split("_")
-    ticket_id, user_id = data[2], data[3]
-    await state.update_data(ticket_id=ticket_id, user_id=user_id)
-    await call.message.edit_text(f"💬 Formulating reply for node <code>{user_id}</code>.\n\nType your message payload:", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.ticket_reply_msg)
-
-@dp.message(AdminStates.ticket_reply_msg)
-async def send_ticket_reply(m: Message, state: FSMContext):
-    data = await state.get_data()
+def get_process_stats(pid):
     try:
-        await bot.send_message(data['user_id'], f"📞 <b>Admin Reply (Ref #{data['ticket_id']}):</b>\n\n{m.text}", parse_mode='HTML')
-        db_query("UPDATE tickets SET status='Closed' WHERE id=?", (data['ticket_id'],))
-        await m.answer("✅ Payload delivered and connection closed successfully.", reply_markup=admin_kb(), parse_mode='HTML')
-    except Exception as e: await m.answer(f"❌ Transmission Error: {e}", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
+        proc = psutil.Process(pid)
+        cpu = proc.cpu_percent(interval=0.5)
+        mem = proc.memory_info()
+        ram = mem.rss / (1024 * 1024)
+        return {
+            'cpu_percent': round(cpu, 1),
+            'ram_mb': round(ram, 1),
+            'ram_display': f"{ram:.1f} MB" if ram < 1024 else f"{ram/1024:.1f} GB",
+        }
+    except:
+        return {'cpu_percent': 0, 'ram_mb': 0, 'ram_display': '0 MB'}
 
-@dp.callback_query(F.data == "admin_broadcast_btn")
-async def admin_broadcast_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text("📢 <b>Mass Broadcast Protocol</b>\n\nSend the rich message payload you wish to transmit globally across the grid:", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.broadcast_msg)
+def get_network_stats(psutil_pid):
+    try:
+        proc = psutil.Process(psutil_pid)
+        io = proc.io_counters()
+        if io:
+            read_kb = io.read_bytes / 1024
+            write_kb = io.write_bytes / 1024
+            return format_bytes(read_kb), format_bytes(write_kb)
+    except: pass
+    return "0 KB", "0 KB"
 
-@dp.message(AdminStates.broadcast_msg)
-async def admin_broadcast_send(message: Message, state: FSMContext):
-    users = db_query("SELECT user_id FROM users", fetchall=True)
-    sent, failed = 0, 0
-    m = await message.answer("⏳ Broadcast protocol initiated... Do not interrupt.", parse_mode='HTML')
-    for u in users:
+def format_bytes(kb):
+    if kb < 1024: return f"{kb:.1f} KB"
+    mb = kb / 1024
+    if mb < 1024: return f"{mb:.1f} MB"
+    gb = mb / 1024
+    return f"{gb:.2f} GB"
+
+# ============================================
+# 🔥 পাবলিক API - সার্ভার তৈরি
+# ============================================
+
+@app.route('/api/create', methods=['GET'])
+def api_create_server():
+    username = request.args.get('username', '').strip()
+    password = request.args.get('password', '').strip()
+    server_type = request.args.get('type', 'python').strip()
+    ram = request.args.get('ram', '1GB').strip()
+    disk = request.args.get('disk', '1GB').strip()
+    cpu_limit = int(request.args.get('cpu', '30'))
+    days = int(request.args.get('days', '3'))
+    
+    if not password:
+        password = generate_random_password(10)
+    
+    if not username:
+        username = f"VELATRIX_CODEX{random.randint(10000, 99999)}"
+    
+    if len(username) < 3:
+        return jsonify({'status': 'error', 'message': 'Username must be at least 3 characters!'}), 400
+    
+    if len(password) < 4:
+        return jsonify({'status': 'error', 'message': 'Password must be at least 4 characters!'}), 400
+    
+    if cpu_limit < 10 or cpu_limit > 100:
+        return jsonify({'status': 'error', 'message': 'CPU limit must be between 10 and 100!'}), 400
+    
+    if days < 1 or days > 365:
+        return jsonify({'status': 'error', 'message': 'Days must be between 1 and 365!'}), 400
+    
+    users = load_users()
+    
+    if username in users:
+        return jsonify({'status': 'error', 'message': f"Username '{username}' already exists!"}), 400
+    
+    server_id = str(uuid.uuid4())[:8]
+    expiry_date = datetime.now() + timedelta(days=days)
+    
+    create_default_files(get_server_dir(server_id))
+    
+    host = request.host
+    is_local = host.startswith('localhost') or host.startswith('127.0.0.1') or host.startswith('192.168')
+    scheme = 'http' if is_local else 'https'
+    full_url = f"{scheme}://{host}/{server_id}/login"
+    
+    new_server = {
+        'server_id': server_id,
+        'login_url': f"/{server_id}/login",
+        'dashboard_url': f"/{server_id}/home",
+        'full_link': full_url,
+        'type': server_type,
+        'ram': ram, 'disk': disk,
+        'status': 'stopped', 'pid': None,
+        'created': str(datetime.now()),
+        'expiry': str(expiry_date),
+        'main_file': 'main.py',
+        'requirements_file': 'requirements.txt',
+        'cpu_limit': cpu_limit,
+        'rate_limit_exceeded': False,
+        'stopped_by_user': False
+    }
+    
+    users[username] = {'password': password, 'role': 'user', 'servers': [new_server]}
+    save_users(users)
+    
+    return jsonify({
+        'status': 'success',
+        'message': 'Panel created successfully!',
+        'username': username,
+        'password': password,
+        'server_type': server_type,
+        'ram': ram,
+        'disk': disk,
+        'cpu_limit': cpu_limit,
+        'validity': f'{days} days',
+        'expiry_date': expiry_date.strftime('%Y-%m-%d'),
+        'full_url': full_url,
+        'server_id': server_id
+    }), 200
+
+# ============================================
+# রাউটস
+# ============================================
+
+@app.route('/')
+def index():
+    return render_template('landing.html')
+
+@app.route('/landing')
+def landing():
+    return render_template('landing.html')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+        users = load_users()
+        if username == 'admin' and password == users.get('admin', {}).get('password'):
+            session['user'] = 'admin'
+            session['role'] = 'admin'
+            return redirect(url_for('admin_dashboard'))
+        return render_template('login.html', error="Invalid credentials!")
+    return render_template('login.html', error=None)
+
+@app.route('/<server_id>/login', methods=['GET', 'POST'])
+def server_login(server_id):
+    valid, result = check_server_valid(server_id)
+    if not valid:
+        return render_template('error.html', error_type=result if result else "deleted", server_link=server_id)
+    
+    if request.method == 'POST':
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+        users = load_users()
+        for uname, data in users.items():
+            if uname == 'admin': continue
+            servers = data.get('servers', [])
+            if not isinstance(servers, list): continue
+            for s in servers:
+                if isinstance(s, dict) and s.get('server_id') == server_id:
+                    if username == uname and password == data.get('password'):
+                        session['user'] = uname
+                        session['role'] = 'user'
+                        session['current_server_id'] = server_id
+                        return redirect(url_for('server_home', server_id=server_id))
+                    else:
+                        return render_template('login.html', error="Invalid credentials!")
+        return render_template('login.html', error="Invalid login!")
+    return render_template('login.html', error=None)
+
+@app.route('/<server_id>/home')
+def server_home(server_id):
+    if 'user' not in session or session.get('role') != 'user':
+        return redirect(url_for('server_login', server_id=server_id))
+    if session.get('current_server_id') != server_id:
+        session.clear()
+        return redirect(url_for('server_login', server_id=server_id))
+    
+    valid, result = check_server_valid(server_id)
+    if not valid:
+        session.clear()
+        return render_template('error.html', error_type=result if result else "deleted", server_link=server_id)
+    
+    return render_template('home.html', username=session['user'], current_server=result)
+
+@app.route('/logout')
+def logout():
+    server_id = session.get('current_server_id')
+    session.clear()
+    if server_id:
+        return redirect(url_for('server_login', server_id=server_id))
+    return redirect(url_for('login'))
+
+# ============================================
+# অ্যাডমিন
+# ============================================
+
+@app.route('/admin')
+def admin_dashboard():
+    if 'user' not in session or session.get('role') != 'admin':
+        return redirect(url_for('login'))
+    users = load_users()
+    user_list = []
+    total_servers = 0
+    total_running = 0
+    for uname, data in users.items():
+        if uname == 'admin': continue
+        servers = data.get('servers', [])
+        if not isinstance(servers, list): servers = []
+        running = sum(1 for s in servers if isinstance(s, dict) and s.get('status') == 'running')
+        total_servers += len(servers)
+        total_running += running
+        user_list.append({
+            'username': uname, 'password': data.get('password', ''),
+            'servers': servers, 'server_count': len(servers), 'running_count': running
+        })
+    return render_template('admin.html', users=user_list, total_servers=total_servers, total_running=total_running)
+
+@app.route('/admin/create_server', methods=['POST'])
+def create_server():
+    if 'user' not in session or session.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    data = request.get_json()
+    username = data.get('username', '')
+    password = data.get('password', '')
+    server_type = data.get('server_type', 'python')
+    ram = data.get('ram', '512MB')
+    disk = data.get('disk', '1GB')
+    expiry_days = int(data.get('expiry_days', 30))
+    cpu_limit = int(data.get('cpu_limit', 80))
+    
+    if not username or not password:
+        return jsonify({'error': 'Required!'}), 400
+    
+    users = load_users()
+    server_id = str(uuid.uuid4())[:8]
+    expiry_date = datetime.now() + timedelta(days=expiry_days)
+    
+    create_default_files(get_server_dir(server_id))
+    
+    new_server = {
+        'server_id': server_id, 'link': server_id,
+        'login_url': f"/{server_id}/login",
+        'dashboard_url': f"/{server_id}/home",
+        'full_link': request.host_url.rstrip('/') + f"/{server_id}/home",
+        'type': server_type, 'ram': ram, 'disk': disk,
+        'status': 'stopped', 'pid': None,
+        'created': str(datetime.now()), 'expiry': str(expiry_date),
+        'main_file': 'main.py', 'requirements_file': 'requirements.txt',
+        'cpu_limit': cpu_limit, 'rate_limit_exceeded': False, 'stopped_by_user': False
+    }
+    
+    if username not in users:
+        users[username] = {'password': password, 'role': 'user', 'servers': []}
+    
+    users[username]['servers'].append(new_server)
+    save_users(users)
+    
+    return jsonify({
+        'success': True, 'username': username, 'password': password,
+        'login_url': new_server['login_url'],
+        'hostname': new_server['full_link'],
+        'server_id': server_id
+    })
+
+@app.route('/admin/set_rate_limit/<server_id>', methods=['POST'])
+def set_rate_limit(server_id):
+    if 'user' not in session or session.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+    cpu_limit = int(request.get_json().get('cpu_limit', 80))
+    users = load_users()
+    for uname, udata in users.items():
+        if uname == 'admin': continue
+        servers = udata.get('servers', [])
+        if not isinstance(servers, list): continue
+        for s in servers:
+            if isinstance(s, dict) and s.get('server_id') == server_id:
+                s['cpu_limit'] = cpu_limit
+                save_users(users)
+                return jsonify({'success': True, 'cpu_limit': cpu_limit})
+    return jsonify({'error': 'Not found'}), 404
+
+@app.route('/admin/delete_server/<username>/<server_id>', methods=['POST'])
+def delete_server(username, server_id):
+    if 'user' not in session or session.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+    users = load_users()
+    if username in users:
+        servers = users[username].get('servers', [])
+        if not isinstance(servers, list): servers = []
+        for s in servers:
+            if isinstance(s, dict) and s.get('server_id') == server_id:
+                if s.get('pid'): stop_bot_process(s['pid'])
+                try: shutil.rmtree(get_server_dir(server_id))
+                except: pass
+                break
+        users[username]['servers'] = [s for s in servers if isinstance(s, dict) and s.get('server_id') != server_id]
+        if len(users[username]['servers']) == 0:
+            del users[username]
+        save_users(users)
+    return jsonify({'success': True})
+
+# ============================================
+# বট API
+# ============================================
+
+@app.route('/api/run/<server_id>', methods=['POST'])
+def api_run(server_id):
+    server, _ = get_server_by_id(server_id)
+    if not server: return jsonify({'status': 'error', 'msg': 'Not found'})
+    if server.get('status') == 'running': return jsonify({'status': 'error', 'msg': 'Already running!'})
+    
+    server['rate_limit_exceeded'] = False
+    server['stopped_by_user'] = False
+    
+    pid, error = run_bot(server_id, server.get('main_file', 'main.py'), server.get('requirements_file', 'requirements.txt'))
+    
+    if pid:
+        users = load_users()
+        for uname, data in users.items():
+            if uname == 'admin': continue
+            servers = data.get('servers', [])
+            if not isinstance(servers, list): continue
+            for s in servers:
+                if isinstance(s, dict) and s.get('server_id') == server_id:
+                    s['status'] = 'running'
+                    s['pid'] = pid
+                    s['started_at'] = str(datetime.now())
+                    save_users(users)
+                    break
+        threading.Thread(target=monitor_bot, args=(server_id, pid), daemon=True).start()
+        return jsonify({'status': 'success', 'msg': 'Started!'})
+    return jsonify({'status': 'error', 'msg': error or 'Failed'})
+
+@app.route('/api/stop/<server_id>', methods=['POST'])
+def api_stop(server_id):
+    server, _ = get_server_by_id(server_id)
+    if not server: return jsonify({'status': 'error', 'msg': 'Not found'})
+    
+    if server.get('pid'): stop_bot_process(server['pid'])
+    
+    users = load_users()
+    for uname, data in users.items():
+        if uname == 'admin': continue
+        servers = data.get('servers', [])
+        if not isinstance(servers, list): continue
+        for s in servers:
+            if isinstance(s, dict) and s.get('server_id') == server_id:
+                s['status'] = 'stopped'
+                s['pid'] = None
+                s['stopped_by_user'] = True
+                save_users(users)
+                break
+    
+    log_file = os.path.join(get_server_dir(server_id), 'output.log')
+    try:
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(f"\n[{datetime.now().strftime('%I:%M:%S %p')}] Server stopped by user\n")
+    except: pass
+    
+    return jsonify({'status': 'success', 'msg': 'Stopped'})
+
+@app.route('/api/logs/<server_id>')
+def api_logs(server_id):
+    log_file = os.path.join(get_server_dir(server_id), 'output.log')
+    if os.path.exists(log_file):
+        with open(log_file, 'r', encoding='utf-8') as f: logs = f.read()
+    else: logs = ""
+    return jsonify({'logs': logs})
+
+@app.route('/api/clear_logs/<server_id>', methods=['POST'])
+def api_clear_logs(server_id):
+    log_file = os.path.join(get_server_dir(server_id), 'output.log')
+    try:
+        if os.path.exists(log_file):
+            try: os.remove(log_file)
+            except: open(log_file, 'w').close()
+        return jsonify({'status': 'success', 'msg': 'Cleared'})
+    except: return jsonify({'status': 'error'}), 500
+
+@app.route('/api/command', methods=['POST'])
+def api_command():
+    data = request.get_json()
+    cmd = data.get('cmd', '')
+    server_id = data.get('server_id', '')
+    log_file = os.path.join(get_server_dir(server_id), 'output.log')
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=get_server_dir(server_id), timeout=30,
+                              creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+        output = (result.stdout + result.stderr)[:2000]
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(f"[{datetime.now().strftime('%I:%M:%S %p')}] $ {cmd}\n{output}\n")
+        return jsonify({'status': 'success', 'output': output})
+    except: return jsonify({'status': 'error', 'msg': 'Timeout'})
+
+@app.route('/api/stats/<server_id>')
+def api_stats(server_id):
+    server, _ = get_server_by_id(server_id)
+    if not server:
+        return jsonify({'cpu': '0%', 'ram': '0 MB', 'uptime': '0h', 'status': 'unknown', 'cpu_limit': 80, 'net_in': '0 KB', 'net_out': '0 KB'})
+    
+    uptime, cpu, ram, net_in, net_out = "0h 0m", "0%", "0 MB", "0 KB", "0 KB"
+    
+    if server.get('status') == 'running' and server.get('pid'):
+        stats = get_process_stats(server['pid'])
+        cpu = f"{stats['cpu_percent']}%"
+        ram = stats['ram_display']
+        net_in, net_out = get_network_stats(server['pid'])
+    
+    if server.get('status') == 'running' and server.get('started_at'):
         try:
-            await message.send_copy(chat_id=u[0])
-            sent += 1
-        except Exception: failed += 1
-        await asyncio.sleep(0.06) 
-    await m.edit_text(f"✅ <b>Global Broadcast Complete!</b>\n\n🟢 Nodes reached: {sent}\n🔴 Nodes failed/blocked: {failed}", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
+            start = datetime.strptime(server['started_at'], '%Y-%m-%d %H:%M:%S.%f')
+            diff = datetime.now() - start
+            if diff.days > 0: uptime = f"{diff.days}d {diff.seconds//3600}h"
+            else:
+                h, m, s = diff.seconds // 3600, (diff.seconds % 3600) // 60, diff.seconds % 60
+                uptime = f"{h}h {m}m {s}s"
+        except: pass
+    
+    return jsonify({'cpu': cpu, 'ram': ram, 'uptime': uptime, 'net_in': net_in, 'net_out': net_out, 'cpu_limit': server.get('cpu_limit', 80), 'status': server.get('status', 'stopped')})
 
-@dp.callback_query(F.data == "admin_create_coupon")
-async def admin_create_coupon_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text("🎟 Enter a highly secure alphanumeric sequence for the Promo Code:", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.add_coupon_code)
+# ============================================
+# পাসওয়ার্ড চেঞ্জ
+# ============================================
 
-@dp.message(AdminStates.add_coupon_code)
-async def admin_coupon_code(m: Message, state: FSMContext):
-    await state.update_data(code=m.text.strip().upper())
-    await m.answer("💰 Enter the monetary reward payload in <b>RUPEES (₹)</b>:", parse_mode='HTML')
-    await state.set_state(AdminStates.add_coupon_amount)
+@app.route('/api/change_password/<server_id>', methods=['POST'])
+def api_change_password(server_id):
+    if 'user' not in session: return jsonify({'error': 'Please login first!'}), 403
+    data = request.get_json()
+    current_password = data.get('current_password', '')
+    new_password = data.get('new_password', '')
+    
+    if not current_password or not new_password: return jsonify({'error': 'All fields are required!'})
+    if len(new_password) < 4: return jsonify({'error': 'Password must be at least 4 characters!'})
+    
+    users = load_users()
+    username = session.get('user')
+    
+    if username in users:
+        if users[username].get('password') == current_password:
+            users[username]['password'] = new_password
+            save_users(users)
+            return jsonify({'success': True, 'msg': 'Password changed!'})
+        return jsonify({'error': 'Current password is incorrect!'})
+    return jsonify({'error': 'User not found!'}), 404
 
-@dp.message(AdminStates.add_coupon_amount)
-async def admin_coupon_amount(m: Message, state: FSMContext):
+# ============================================
+# 🔥 GITHUB API (Git ছাড়া Python Download)
+# ============================================
+
+@app.route('/api/github/deploy/<server_id>', methods=['POST'])
+def api_github_deploy(server_id):
+    """Download GitHub repo without git - using Python requests"""
+    data = request.get_json()
+    repo_url = data.get('repo_url', '').strip()
+    access_token = data.get('access_token', '').strip()
+    is_private = data.get('is_private', False)
+    
+    if not repo_url:
+        return jsonify({'status': 'error', 'msg': 'Repository URL is required!'}), 400
+    
+    server_dir = get_server_dir(server_id)
+    log_file = os.path.join(server_dir, 'github_deploy.log')
+    
+    # Clear old deploy log
     try:
-        await state.update_data(amount=float(m.text)) 
-        await m.answer("👥 Enter the exact maximum threshold uses for this code:", parse_mode='HTML')
-        await state.set_state(AdminStates.add_coupon_uses)
-    except ValueError: await m.answer("❌ Non-numerical data detected. Aborting.")
+        with open(log_file, 'w', encoding='utf-8') as f:
+            f.write(f"[{datetime.now().strftime('%I:%M:%S %p')}] Starting GitHub deployment...\n")
+            f.write(f"[{datetime.now().strftime('%I:%M:%S %p')}] Repository: {repo_url}\n")
+            f.write(f"[{datetime.now().strftime('%I:%M:%S %p')}] Type: {'Private' if is_private else 'Public'}\n")
+            f.write("─" * 40 + "\n")
+    except:
+        pass
+    
+    def deploy_thread():
+        try:
+            import requests
+            import shutil
+            
+            def deploy_log(msg):
+                try:
+                    with open(log_file, 'a', encoding='utf-8') as f:
+                        f.write(f"[{datetime.now().strftime('%I:%M:%S %p')}] {msg}\n")
+                        f.flush()
+                except:
+                    pass
+            
+            deploy_log("Preparing deployment...")
+            
+            # Parse GitHub URL → owner/repo/branch
+            # Support: https://github.com/user/repo or https://github.com/user/repo.git
+            # Also: https://github.com/user/repo/tree/branch
+            
+            clean_url = repo_url.replace('.git', '').rstrip('/')
+            
+            # Extract owner and repo
+            if 'github.com' not in clean_url:
+                deploy_log("❌ Error: Only GitHub URLs are supported!")
+                return
+            
+            parts = clean_url.split('github.com/')[-1].split('/')
+            
+            if len(parts) < 2:
+                deploy_log("❌ Error: Invalid GitHub URL format!")
+                return
+            
+            owner = parts[0]
+            repo = parts[1]
+            branch = 'main'  # default branch
+            
+            # Check if branch is specified (tree/branch_name)
+            if len(parts) > 3 and parts[2] == 'tree':
+                branch = parts[3]
+            
+            deploy_log(f"Owner: {owner}")
+            deploy_log(f"Repository: {repo}")
+            deploy_log(f"Branch: {branch}")
+            deploy_log(f"Downloading ZIP archive...")
+            
+            # Build API URL
+            api_url = f"https://api.github.com/repos/{owner}/{repo}/zipball/{branch}"
+            
+            headers = {'Accept': 'application/vnd.github.v3+json'}
+            if is_private and access_token:
+                headers['Authorization'] = f'token {access_token}'
+                deploy_log("Using access token for authentication")
+            
+            # Download ZIP
+            response = requests.get(api_url, headers=headers, stream=True, timeout=60)
+            
+            if response.status_code == 200:
+                deploy_log("✓ Repository downloaded successfully!")
+                deploy_log("Extracting files...")
+                
+                # Save to temp zip
+                temp_zip = os.path.join(server_dir, '_github_temp.zip')
+                with open(temp_zip, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                # Extract
+                try:
+                    with zipfile.ZipFile(temp_zip, 'r') as zf:
+                        # GitHub zipball has a root folder like: owner-repo-commit_hash
+                        # Extract everything inside that folder
+                        root_folder = zf.namelist()[0].split('/')[0]
+                        
+                        for member in zf.namelist():
+                            # Skip the root folder
+                            relative_path = '/'.join(member.split('/')[1:])
+                            if not relative_path:
+                                continue
+                            
+                            target_path = os.path.join(server_dir, relative_path)
+                            
+                            if member.endswith('/'):
+                                # Directory
+                                os.makedirs(target_path, exist_ok=True)
+                            else:
+                                # File
+                                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                                with zf.open(member) as source, open(target_path, 'wb') as target:
+                                    shutil.copyfileobj(source, target)
+                                deploy_log(f"  ✓ {relative_path}")
+                    
+                    deploy_log("")
+                    deploy_log("✅ Deployment completed successfully!")
+                    deploy_log(f"Files extracted to: {server_dir}")
+                    
+                except Exception as e:
+                    deploy_log(f"❌ Extraction error: {str(e)}")
+                finally:
+                    # Clean up temp zip
+                    try:
+                        os.remove(temp_zip)
+                    except:
+                        pass
+                    
+            elif response.status_code == 404:
+                deploy_log("❌ Error: Repository not found!")
+                deploy_log("Check if the URL is correct and the repo is accessible")
+            elif response.status_code == 401:
+                deploy_log("❌ Error: Authentication failed!")
+                deploy_log("Check your access token (for private repos)")
+            elif response.status_code == 403:
+                deploy_log("❌ Error: Rate limit exceeded or access denied!")
+                deploy_log("Try again later or use an access token")
+            else:
+                deploy_log(f"❌ Error: HTTP {response.status_code}")
+                deploy_log(f"Response: {response.text[:200]}")
+            
+        except requests.exceptions.Timeout:
+            try:
+                with open(log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"[{datetime.now().strftime('%I:%M:%S %p')}] ❌ Error: Connection timeout! Check your internet.\n")
+            except:
+                pass
+        except Exception as e:
+            try:
+                with open(log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"[{datetime.now().strftime('%I:%M:%S %p')}] ❌ Error: {str(e)}\n")
+            except:
+                pass
+    
+    threading.Thread(target=deploy_thread, daemon=True).start()
+    return jsonify({'status': 'success', 'msg': 'Deployment started! Check terminal for progress.'})
 
-@dp.message(AdminStates.add_coupon_uses)
-async def admin_coupon_uses(m: Message, state: FSMContext):
-    try:
-        uses = int(m.text)
-        data = await state.get_data()
-        db_query("INSERT OR REPLACE INTO coupons (code, amount, uses_left) VALUES (?, ?, ?)", (data['code'], data['amount'], uses))
-        await m.answer(f"✅ Protocol <b>{data['code']}</b> encoded!\nReward Vector: {fmt_curr(data['amount'])}\nThreshold Limit: {uses} executions.", reply_markup=admin_kb(), parse_mode='HTML')
-        await state.clear()
-    except ValueError: await m.answer("❌ Non-numerical data detected. Aborting.")
-
-# ==============================================================================
-# 21. ADMIN RESELLER & SPIN SETTINGS
-# ==============================================================================
-@dp.callback_query(F.data == "admin_reseller_menu")
-async def admin_reseller_menu(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    status_check = db_query("SELECT value FROM settings WHERE key='reseller_system_status'", fetchone=True)
-    sys_status = status_check[0] if status_check else "ON"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Grant Reseller Rights", callback_data="reseller_make", style="success"), InlineKeyboardButton(text="➖ Revoke Reseller", callback_data="reseller_remove", style="danger")],
-        [InlineKeyboardButton(text="📋 Audit Active Resellers", callback_data="reseller_view", style="primary")],
-        [InlineKeyboardButton(text=f"{'🟢' if sys_status == 'ON' else '🔴'} Auto-Upgrade System: {sys_status}", callback_data="admin_toggle_reseller_sys", style="success" if sys_status == 'ON' else "danger")], 
-        [InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    await call.message.edit_text("👑 <b>Wholesale Reseller Protocols</b>\nSelect administrative action:", reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data == "admin_toggle_reseller_sys")
-async def toggle_reseller_sys(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    res = db_query("SELECT value FROM settings WHERE key='reseller_system_status'", fetchone=True)
-    current = res[0] if res else 'ON'
-    new_status = 'OFF' if current == 'ON' else 'ON'
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES ('reseller_system_status', ?)", (new_status,))
-    await admin_reseller_menu(call)
-
-@dp.callback_query(F.data.in_(["reseller_make", "reseller_remove"]))
-async def reseller_prompt_id(call: CallbackQuery, state: FSMContext):
-    action = call.data
-    await state.update_data(reseller_action=action)
-    await call.message.edit_text("👤 Identify target node. Input <b>User ID</b> or <b>@username</b>:", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.reseller_manage_id)
-
-@dp.message(AdminStates.reseller_manage_id)
-async def process_reseller_manage(m: Message, state: FSMContext):
-    data = await state.get_data()
-    target = m.text.strip()
-    if target.startswith('@'): target = target[1:]
-    user_q = db_query("SELECT user_id, first_name FROM users WHERE user_id=? OR username=? COLLATE NOCASE", (target, target), fetchone=True)
-    if not user_q: return await m.answer("❌ Target completely ghosted. Not in database.", reply_markup=admin_back_kb(), parse_mode='HTML')
-    u_id, u_name = user_q[0], user_q[1]
-    if data['reseller_action'] == "reseller_make":
-        db_query("UPDATE users SET is_reseller=1, reseller_since=?, account_type='Reseller' WHERE user_id=?", (datetime.now().strftime("%Y-%m-%d"), u_id))
-        await m.answer(f"✅ Credentials upgraded. <b>{u_name}</b> (<code>{u_id}</code>) has reseller rights.", reply_markup=admin_kb(), parse_mode='HTML')
+@app.route('/api/github/logs/<server_id>')
+def api_github_logs(server_id):
+    """Get GitHub deployment logs"""
+    log_file = os.path.join(get_server_dir(server_id), 'github_deploy.log')
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, 'r', encoding='utf-8') as f:
+                logs = f.read()
+        except:
+            logs = "> Ready for deployment..."
     else:
-        db_query("UPDATE users SET is_reseller=0, account_type='Regular' WHERE user_id=?", (u_id,))
-        await m.answer(f"✅ Credentials revoked. <b>{u_name}</b> (<code>{u_id}</code>) is back to regular user.", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
+        logs = "> Ready for deployment..."
+    return jsonify({'logs': logs})
 
-@dp.callback_query(F.data == "reseller_view")
-async def reseller_view(call: CallbackQuery):
-    resellers = db_query("SELECT user_id, first_name, username FROM users WHERE is_reseller=1", fetchall=True)
-    if not resellers: return await call.message.edit_text("📋 Zero active resellers found.", reply_markup=admin_back_kb(), parse_mode='HTML')
-    text = "👑 <b><u>ACTIVE RESELLER AUDIT LOG</u></b> 👑\n━━━━━━━━━━━━━━━━━━\n"
-    for r in resellers:
-        uname = f"(@{r[2]})" if r[2] else ""
-        text += f"👤 {r[1]} {uname}\n🆔 <code>{r[0]}</code>\n\n"
-    await call.message.edit_text(text, reply_markup=admin_back_kb(), parse_mode='HTML')
-
-@dp.callback_query(F.data == "admin_spin_menu")
-async def admin_spin_menu(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    status = db_query("SELECT value FROM settings WHERE key='spin_status'", fetchone=True)
-    limit = db_query("SELECT value FROM settings WHERE key='daily_spin_limit'", fetchone=True)
-    status_val = status[0] if status else 'ON'
-    limit_val = limit[0] if limit else '50.0'
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Append Reward Logic", callback_data="spin_add", style="success"), InlineKeyboardButton(text="❌ Drop Reward Logic", callback_data="spin_del", style="danger")],
-        [InlineKeyboardButton(text="📋 Audit Configs", callback_data="spin_view", style="primary"), InlineKeyboardButton(text="⚙️ Throttle Limits", callback_data="spin_limit", style="primary")],
-        [InlineKeyboardButton(text=f"{'🟢' if status_val == 'ON' else '🔴'} Master Toggle: {status_val}", callback_data="spin_toggle", style="success" if status_val == 'ON' else "danger")],
-        [InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    await call.message.edit_text(f"🎰 <b>Advanced Ludo/Spin Algorithms</b>\nCurrent Threshold: ₹{limit_val}", reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data == "spin_toggle")
-async def spin_toggle(call: CallbackQuery):
-    res = db_query("SELECT value FROM settings WHERE key='spin_status'", fetchone=True)
-    current = res[0] if res else 'ON'
-    new_status = 'OFF' if current == 'ON' else 'ON'
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES ('spin_status', ?)", (new_status,))
-    await admin_spin_menu(call)
-
-@dp.callback_query(F.data == "admin_toggle_bot")
-async def toggle_bot(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    res = db_query("SELECT value FROM settings WHERE key='bot_status'", fetchone=True)
-    current = res[0] if res else 'ON'
-    new_status = 'OFF' if current == 'ON' else 'ON'
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES ('bot_status', ?)", (new_status,))
-    await call.message.edit_reply_markup(reply_markup=admin_kb())
-
-@dp.callback_query(F.data == "spin_add")
-async def spin_add_start(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("🎰 Inject new decimal logic limit (e.g. 15.50):", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.spin_add_reward)
-
-@dp.message(AdminStates.spin_add_reward)
-async def spin_add_exec(m: Message, state: FSMContext):
+@app.route('/api/github/clear_logs/<server_id>', methods=['POST'])
+def api_github_clear_logs(server_id):
+    """Clear GitHub deployment logs"""
+    log_file = os.path.join(get_server_dir(server_id), 'github_deploy.log')
     try:
-        amt = float(m.text)
-        db_query("INSERT INTO spin_rewards (amount) VALUES (?)", (amt,))
-        await m.answer(f"✅ Algorithm updated. New vector {fmt_curr(amt)} injected.", reply_markup=admin_kb(), parse_mode='HTML')
-        await state.clear()
-    except ValueError: await m.answer("❌ Math parsing error.")
+        if os.path.exists(log_file):
+            os.remove(log_file)
+        return jsonify({'status': 'success'})
+    except:
+        return jsonify({'status': 'error'}), 500
 
-@dp.callback_query(F.data == "spin_view")
-async def spin_view(call: CallbackQuery):
-    rewards = db_query("SELECT amount FROM spin_rewards ORDER BY amount ASC", fetchall=True)
-    text = "🎰 <b>Live Ludo Constants</b>\n\n"
-    for r in rewards: text += f"🎁 {fmt_curr(r[0])}\n"
-    await call.message.edit_text(text, reply_markup=admin_back_kb(), parse_mode='HTML')
+# ============================================
+# ফাইল API
+# ============================================
 
-@dp.callback_query(F.data == "admin_set_video")
-async def admin_set_video_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text("📹 Input direct streaming / YouTube Link for Tutorial system:\n<i>(Or type 'None' to clear registry):</i>", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_howto_video)
-
-@dp.message(AdminStates.wait_for_howto_video)
-async def exec_set_video(m: Message, state: FSMContext):
-    link = m.text.strip()
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES ('how_to_video', ?)", (link,))
-    await m.answer("✅ Routing complete. Video linked.", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_set_all_files")
-async def admin_set_all_files_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text("🔗 Input the direct Channel / Cloud URL for 'Download Files' button:\n<i>(Or type 'None' to format data):</i>", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_all_files_link)
-
-@dp.message(AdminStates.wait_for_all_files_link)
-async def exec_set_all_files(m: Message, state: FSMContext):
-    link = m.text.strip()
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES ('all_files_link', ?)", (link,))
-    await m.answer("✅ Global resource variable updated.", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_edit_emojis")
-async def admin_edit_emojis(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    rows = db_query("SELECT key, value FROM settings WHERE key LIKE 'emoji_%' ORDER BY key", fetchall=True)
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for row in rows:
-        key = row[0]
-        slot = key.replace("emoji_", "")
-        current_id = row[1] if row[1] else "Not set"
-        kb.inline_keyboard.append([InlineKeyboardButton(text=f"{slot} (ID: {current_id})", callback_data=f"edit_emoji_{slot}", style="primary")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text("🎨 <b>Edit All Emojis</b>\nChoose an emoji slot to change its ID:", reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("edit_emoji_"))
-async def admin_edit_emoji_prompt(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    slot = call.data.split("edit_emoji_", 1)[1]
-    await state.update_data(emoji_slot=slot)
-    current = get_setting(f"emoji_{slot}", "Not set")
-    await call.message.edit_text(f"✏️ Enter new emoji ID for <b>{slot}</b>:\nCurrent: {current}\n(Leave empty to reset to default)", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_emoji_slot)
-
-@dp.message(AdminStates.wait_for_emoji_slot)
-async def save_emoji_slot(m: Message, state: FSMContext):
-    data = await state.get_data()
-    slot = data['emoji_slot']
-    new_id = m.text.strip()
-    if new_id == "":
-        db_query("DELETE FROM settings WHERE key=?", (f"emoji_{slot}",))
-        await m.answer(f"✅ Reset emoji for '{slot}' to default.", reply_markup=admin_kb(), parse_mode='HTML')
-    else:
-        if not new_id.isdigit():
-            await m.answer("❌ Invalid ID! Must be numeric.", reply_markup=admin_kb(), parse_mode='HTML')
-            return
-        set_setting(f"emoji_{slot}", new_id)
-        await m.answer(f"✅ Emoji for '{slot}' updated to ID {new_id}.", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_edit_ui_menu")
-async def admin_edit_ui_menu(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Edit Start Menu Text", callback_data="edit_ui_start", style="primary")],
-        [InlineKeyboardButton(text="Edit Download Files Text", callback_data="edit_ui_download", style="primary")],
-        [InlineKeyboardButton(text="Edit VIP Menu Text", callback_data="edit_ui_vip", style="primary")],
-        [InlineKeyboardButton(text="Edit Lucky Dice Text", callback_data="edit_ui_dice", style="primary")],
-        [InlineKeyboardButton(text="Edit Add Balance Text", callback_data="edit_ui_add_balance", style="primary")],
-        [InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    await call.message.edit_text("✏️ <b>Edit User Interface Texts</b>\nSelect which text you want to modify:", reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("edit_ui_"))
-async def admin_edit_ui_prompt(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    ui_key = call.data.split("_")[2]
-    await state.update_data(ui_key=ui_key)
-    current_text = get_ui_text(ui_key)
-    await call.message.edit_text(f"📝 Send the new text for <b>{ui_key.upper()}</b> menu.\n\nCurrent text:\n{current_text}", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.edit_ui_text)
-
-@dp.message(AdminStates.edit_ui_text)
-async def admin_save_ui_text(m: Message, state: FSMContext):
-    data = await state.get_data()
-    ui_key = data['ui_key']
-    new_text = m.text
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (f"ui_{ui_key}", new_text))
-    await m.answer(f"✅ UI text <b>{ui_key}</b> updated successfully!", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_edit_reseller_price")
-async def admin_edit_reseller_price_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    prods = db_query("SELECT id, name, category, panel_name, reseller_price FROM products ORDER BY category, panel_name", fetchall=True)
-    if not prods: return await call.message.edit_text("No products to edit.", reply_markup=admin_back_kb(), parse_mode='HTML')
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for p in prods:
-        panel_name = p[3] if p[3] is not None else ""
-        r_price = safe_float(p[4])
-        kb.inline_keyboard.append([InlineKeyboardButton(text=f"{p[2]} - {panel_name} - {p[1]} (₹{r_price:.2f})", callback_data=f"edit_reseller_{p[0]}", style="primary")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text("👑 <b>Edit Reseller Price per Product</b>\nSelect a product to change its wholesale price:", reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("edit_reseller_"))
-async def admin_edit_reseller_price_prompt(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    prod_id = int(call.data.split("_")[2])
-    await state.update_data(edit_reseller_prod_id=prod_id)
-    await call.message.edit_text("💰 Enter the new <b>Reseller Price</b> in Rupees (₹) for this product:", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.edit_reseller_price)
-
-@dp.message(AdminStates.edit_reseller_price)
-async def admin_save_reseller_price(m: Message, state: FSMContext):
+@app.route('/api/files/<server_id>')
+def api_files(server_id):
+    folder = request.args.get('folder', '')
+    server_dir = get_server_dir(server_id)
+    if folder:
+        server_dir = os.path.join(server_dir, folder)
+        if not os.path.abspath(server_dir).startswith(os.path.abspath(get_server_dir(server_id))):
+            return jsonify({'files': []})
+    if not os.path.exists(server_dir): return jsonify({'files': []})
+    
+    files = []
     try:
-        new_price = float(m.text)
-        data = await state.get_data()
-        prod_id = data['edit_reseller_prod_id']
-        db_query("UPDATE products SET reseller_price=? WHERE id=?", (new_price, prod_id))
-        await m.answer(f"✅ Reseller price updated to {fmt_curr(new_price)} for product ID {prod_id}.", reply_markup=admin_kb(), parse_mode='HTML')
-        await state.clear()
-    except ValueError: await m.answer("❌ Invalid number. Please enter a valid price.")
+        for item in os.listdir(server_dir):
+            item_path = os.path.join(server_dir, item)
+            files.append({'name': item, 'is_dir': os.path.isdir(item_path), 'size': os.path.getsize(item_path) if os.path.isfile(item_path) else 0, 'modified': datetime.fromtimestamp(os.path.getmtime(item_path)).strftime('%Y-%m-%d %H:%M')})
+    except: pass
+    return jsonify({'files': files})
 
-@dp.callback_query(F.data == "admin_set_reseller_fee")
-async def admin_set_reseller_fee(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text("💰 Enter the new <b>Reseller Setup Fee</b> in Rupees (₹):\nCurrent: " + get_setting("reseller_setup_fee", "200.0"), reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_reseller_setup_fee)
+@app.route('/api/file/<server_id>', methods=['GET'])
+def api_get_file(server_id):
+    filename = request.args.get('filename', '')
+    filepath = os.path.join(get_server_dir(server_id), filename)
+    if os.path.exists(filepath) and os.path.isfile(filepath):
+        with open(filepath, 'r', encoding='utf-8') as f: return jsonify({'content': f.read()})
+    return jsonify({'error': 'Not found'}), 404
 
-@dp.message(AdminStates.wait_for_reseller_setup_fee)
-async def admin_save_reseller_fee(m: Message, state: FSMContext):
-    try:
-        fee = float(m.text)
-        set_setting("reseller_setup_fee", str(fee))
-        await m.answer(f"✅ Reseller setup fee updated to {fmt_curr(fee)}.", reply_markup=admin_kb(), parse_mode='HTML')
-        await state.clear()
-    except ValueError: await m.answer("❌ Invalid number. Please enter a valid amount.")
+@app.route('/api/file/<server_id>', methods=['POST'])
+def api_save_file(server_id):
+    data = request.get_json()
+    filepath = os.path.join(get_server_dir(server_id), data.get('filename', ''))
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, 'w', encoding='utf-8') as f: f.write(data.get('content', ''))
+    return jsonify({'success': True})
 
-@dp.callback_query(F.data == "admin_set_reseller_min")
-async def admin_set_reseller_min(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text("💳 Enter the new <b>Minimum Balance</b> required to become reseller (₹):\nCurrent: " + get_setting("reseller_min_balance", "500.0"), reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_reseller_min_balance)
+@app.route('/api/file/<server_id>', methods=['DELETE'])
+def api_delete_file(server_id):
+    data = request.get_json()
+    filepath = os.path.join(get_server_dir(server_id), data.get('filename', ''))
+    if os.path.exists(filepath):
+        if os.path.isdir(filepath): shutil.rmtree(filepath)
+        else: os.remove(filepath)
+    return jsonify({'success': True})
 
-@dp.message(AdminStates.wait_for_reseller_min_balance)
-async def admin_save_reseller_min(m: Message, state: FSMContext):
-    try:
-        min_bal = float(m.text)
-        set_setting("reseller_min_balance", str(min_bal))
-        await m.answer(f"✅ Minimum reseller balance updated to {fmt_curr(min_bal)}.", reply_markup=admin_kb(), parse_mode='HTML')
-        await state.clear()
-    except ValueError: await m.answer("❌ Invalid number. Please enter a valid amount.")
+@app.route('/api/upload/<server_id>', methods=['POST'])
+def api_upload(server_id):
+    if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
+    folder = request.form.get('folder', '')
+    server_dir = get_server_dir(server_id)
+    if folder:
+        server_dir = os.path.join(server_dir, folder)
+        os.makedirs(server_dir, exist_ok=True)
+    file = request.files['file']
+    file.save(os.path.join(server_dir, file.filename))
+    return jsonify({'success': True})
 
-@dp.callback_query(F.data == "admin_set_support_links")
-async def admin_set_support_links(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📞 Set Telegram Link", callback_data="admin_set_telegram", style="primary")],
-        [InlineKeyboardButton(text="📱 Set WhatsApp Link", callback_data="admin_set_whatsapp", style="primary")],
-        [InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")]
-    ])
-    await call.message.edit_text("📌 <b>Support Contact Links</b>\nSet the URLs for Telegram and WhatsApp support:", reply_markup=kb, parse_mode='HTML')
+@app.route('/api/create_folder/<server_id>', methods=['POST'])
+def api_create_folder(server_id):
+    data = request.get_json()
+    os.makedirs(os.path.join(get_server_dir(server_id), data.get('foldername', '')), exist_ok=True)
+    return jsonify({'success': True})
 
-@dp.callback_query(F.data == "admin_set_telegram")
-async def admin_set_telegram(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text("✈️ Enter the Telegram contact URL (e.g., https://t.me/YourSupport):", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_support_telegram)
+@app.route('/api/rename/<server_id>', methods=['POST'])
+def api_rename(server_id):
+    d = request.get_json()
+    server_dir = get_server_dir(server_id)
+    old_path = os.path.join(server_dir, d.get('old_name', ''))
+    new_path = os.path.join(server_dir, d.get('new_name', ''))
+    if os.path.exists(old_path):
+        os.rename(old_path, new_path)
+        return jsonify({'success': True})
+    return jsonify({'error': 'Not found'}), 404
 
-@dp.message(AdminStates.wait_for_support_telegram)
-async def save_telegram_link(m: Message, state: FSMContext):
-    link = m.text.strip()
-    set_setting("support_telegram", link)
-    await m.answer("✅ Telegram support link updated!", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
+@app.route('/api/unzip/<server_id>', methods=['POST'])
+def api_unzip(server_id):
+    data = request.get_json()
+    zip_path = os.path.join(get_server_dir(server_id), data.get('filename', ''))
+    if os.path.exists(zip_path) and zip_path.endswith('.zip'):
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf: zf.extractall(os.path.dirname(zip_path))
+            return jsonify({'status': 'success', 'msg': 'Extracted!'})
+        except Exception as e: return jsonify({'status': 'error', 'msg': str(e)})
+    return jsonify({'status': 'error', 'msg': 'Invalid zip'}), 400
 
-@dp.callback_query(F.data == "admin_set_whatsapp")
-async def admin_set_whatsapp(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text("📱 Enter the WhatsApp contact URL (e.g., https://wa.me/1234567890):", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_support_whatsapp)
+@app.route('/api/get_startup/<server_id>')
+def api_get_startup(server_id):
+    server, _ = get_server_by_id(server_id)
+    if server: return jsonify({'main_file': server.get('main_file', 'main.py'), 'requirements_file': server.get('requirements_file', 'requirements.txt')})
+    return jsonify({'main_file': 'main.py', 'requirements_file': 'requirements.txt'})
 
-@dp.message(AdminStates.wait_for_support_whatsapp)
-async def save_whatsapp_link(m: Message, state: FSMContext):
-    link = m.text.strip()
-    set_setting("support_whatsapp", link)
-    await m.answer("✅ WhatsApp support link updated!", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
+@app.route('/api/set_startup/<server_id>', methods=['POST'])
+def api_set_startup(server_id):
+    d = request.get_json()
+    users = load_users()
+    for uname, udata in users.items():
+        if uname == 'admin': continue
+        servers = udata.get('servers', [])
+        if not isinstance(servers, list): continue
+        for s in servers:
+            if isinstance(s, dict) and s.get('server_id') == server_id:
+                s['main_file'] = d.get('main_file', 'main.py')
+                s['requirements_file'] = d.get('requirements_file')
+                save_users(users)
+                return jsonify({'success': True})
+    return jsonify({'error': 'Not found'}), 404
 
-@dp.callback_query(F.data == "admin_set_category_emojis")
-async def admin_set_category_emojis(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for cat in FIXED_CATEGORIES:
-        current = get_setting(f"cat_emoji_{cat}", "Not set")
-        kb.inline_keyboard.append([InlineKeyboardButton(text=f"{cat} (ID: {current})", callback_data=f"set_cat_emoji_{cat}", style="primary")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text("🎨 <b>Set Category Emojis</b>\nChoose a category to set its custom emoji ID:", reply_markup=kb, parse_mode='HTML')
+# ============================================
+# স্টার্ট
+# ============================================
 
-@dp.callback_query(F.data.startswith("set_cat_emoji_"))
-async def admin_set_category_emoji_prompt(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    category = call.data.split("set_cat_emoji_", 1)[1]
-    await state.update_data(cat_emoji_category=category)
-    await call.message.edit_text(f"🎨 Enter the emoji ID for <b>{category}</b>:\n(Leave empty to reset to default)", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_category_emoji)
-
-@dp.message(AdminStates.wait_for_category_emoji)
-async def save_category_emoji(m: Message, state: FSMContext):
-    data = await state.get_data()
-    category = data['cat_emoji_category']
-    emoji_id = m.text.strip()
-    if emoji_id == "":
-        db_query("DELETE FROM settings WHERE key=?", (f"cat_emoji_{category}",))
-        await m.answer(f"✅ Reset emoji for {category} to default.", reply_markup=admin_kb(), parse_mode='HTML')
-    else:
-        if not emoji_id.isdigit():
-            await m.answer("❌ Invalid ID! Must be numeric.", reply_markup=admin_kb(), parse_mode='HTML')
-            return
-        set_setting(f"cat_emoji_{category}", emoji_id)
-        await m.answer(f"✅ Emoji set for {category} successfully!", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_set_panel_emojis")
-async def admin_set_panel_emojis(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    panels = db_query("SELECT DISTINCT panel_name FROM products WHERE panel_name != '' ORDER BY panel_name", fetchall=True)
-    if not panels:
-        await call.message.edit_text("No panel names found in products.", reply_markup=admin_back_kb(), parse_mode='HTML')
-        return
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for p in panels:
-        panel = p[0]
-        current = get_setting(f"panel_emoji_{panel}", "Not set")
-        kb.inline_keyboard.append([InlineKeyboardButton(text=f"{panel} (ID: {current})", callback_data=f"set_panel_emoji_{panel}", style="primary")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="Back to Admin", callback_data="admin_panel_back", icon_custom_emoji_id=get_emoji_icon("back"), style="danger")])
-    await call.message.edit_text("🖼 <b>Set Panel Emojis</b>\nChoose a panel name to set its custom emoji ID:", reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data.startswith("set_panel_emoji_"))
-async def admin_set_panel_emoji_prompt(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    panel_name = call.data.split("set_panel_emoji_", 1)[1]
-    await state.update_data(panel_emoji_name=panel_name)
-    await call.message.edit_text(f"🎨 Enter the emoji ID for panel <b>{panel_name}</b>:\n(Leave empty to reset to default)", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_panel_emoji_id)
-
-@dp.message(AdminStates.wait_for_panel_emoji_id)
-async def save_panel_emoji(m: Message, state: FSMContext):
-    data = await state.get_data()
-    panel_name = data['panel_emoji_name']
-    emoji_id = m.text.strip()
-    if emoji_id == "":
-        db_query("DELETE FROM settings WHERE key=?", (f"panel_emoji_{panel_name}",))
-        await m.answer(f"✅ Reset emoji for panel '{panel_name}'.", reply_markup=admin_kb(), parse_mode='HTML')
-    else:
-        if not emoji_id.isdigit():
-            await m.answer("❌ Invalid ID! Must be numeric.", reply_markup=admin_kb(), parse_mode='HTML')
-            return
-        set_setting(f"panel_emoji_{panel_name}", emoji_id)
-        await m.answer(f"✅ Emoji set for panel '{panel_name}'!", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_setup_zapupi")
-async def setup_zapupi_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text("⚙️ <b>ZAPUPI SECURITY DEPLOYMENT</b>\nInput master <b>API Key (zap_key)</b>:\n<i>(Type /cancel to abort sequence)</i>", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_zapupi_api)
-
-@dp.message(AdminStates.wait_for_zapupi_api)
-async def zapupi_api(m: Message, state: FSMContext):
-    if m.text == '/cancel':
-        await state.clear()
-        return await m.answer("Sequence killed.", reply_markup=admin_kb(), parse_mode='HTML')
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES ('zapupi_api', ?)", (m.text.strip(),))
-    await m.answer("✅ <b>Keys synchronized with ZapUPI backbone.</b>", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_setup_binance")
-async def setup_binance_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text("🪙 <b>CRYPTO NODE INIT: Step 1/3</b>\nInput Master <b>Binance API Key</b>:\n<i>(Type /cancel to halt protocol)</i>", reply_markup=admin_back_kb(), parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_binance_api)
-
-@dp.message(AdminStates.wait_for_binance_api)
-async def setup_binance_api(m: Message, state: FSMContext):
-    if m.text == '/cancel':
-        await state.clear()
-        return await m.answer("Sequence aborted.", reply_markup=admin_kb(), parse_mode='HTML')
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES ('binance_api', ?)", (m.text.strip(),))
-    await m.answer("🪙 <b>CRYPTO NODE INIT: Step 2/3</b>\nNow inject the highly secure <b>Binance Secret Key</b>:", parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_binance_secret)
-
-@dp.message(AdminStates.wait_for_binance_secret)
-async def setup_binance_secret(m: Message, state: FSMContext):
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES ('binance_secret', ?)", (m.text.strip(),))
-    await m.answer("🪙 <b>CRYPTO NODE INIT: Step 3/3</b>\nFinal variable: Set the public <b>USDT Deposit Address (TRC20/BEP20)</b>\nUsers will broadcast to this ledger:", parse_mode='HTML')
-    await state.set_state(AdminStates.wait_for_binance_address)
-
-@dp.message(AdminStates.wait_for_binance_address)
-async def setup_binance_address(m: Message, state: FSMContext):
-    db_query("INSERT OR REPLACE INTO settings (key, value) VALUES ('binance_address', ?)", (m.text.strip(),))
-    await m.answer("✅ <b>Blockchain node synchronized.</b> Crypto gateway is fully armed.", reply_markup=admin_kb(), parse_mode='HTML')
-    await state.clear()
-
-# ==============================================================================
-# 22. BOOTSTRAPPING & MAIN
-# ==============================================================================
-async def main() -> None:
-    init_db()
-    logger.info("Initializing DB structure...")
-    migrate_categories()
-    asyncio.create_task(auto_verify_task())
-    logger.info("ZapUPI Auto-Verifier Daemon Running in Background.")
-    logger.info("🚀 CORE SYSTEM IS FULLY OPERATIONAL...")
-    try:
-        await dp.start_polling(bot)
-    except Exception as err:
-        logger.error(f"Critical System Failure in Polling: {err}")
-    finally:
-        await bot.session.close()
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("System shutting down gracefully. Goodbye.")
+if __name__ == '__main__':
+    print("\n" + "=" * 50)
+    print("🚀 NERO HOSTING - FINAL")
+    print("=" * 50)
+    print("📍 Landing: http://localhost:5000")
+    print("📍 Admin: http://localhost:5000/login")
+    print("🔗 API: http://localhost:5000/api/create")
+    print("👤 admin / nero23")
+    print("=" * 50 + "\n")
+    app.run(debug=True, host='0.0.0.0', port=5000)

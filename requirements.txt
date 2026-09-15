@@ -1,2 +1,4 @@
-aiogram
-aiohttp
+Flask
+Flask-Session
+werkzeug
+psutil
